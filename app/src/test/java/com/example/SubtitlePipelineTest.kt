@@ -34,7 +34,7 @@ class SubtitlePipelineTest {
 
     @Test
     fun parsesAssDialogueWithCommaInSubtitleText() {
-        val ass = "[Script Info]\nTitle: Test\n[V4+ Styles]\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:03.50,Default,,0,0,0,,Hello, world\\Nsecond line"
+        val ass = "[Script Info]\nTitle: Test\n[V4+ Styles]\n[Events]\nFormat: Start, End, Layer, Text\nDialogue: 0:00:01.00,0:00:03.50,0,Hello, world\\Nsecond line"
         val cues = SubtitlePipeline.parse(ass, "ass")
         assertEquals(1, cues.size)
         assertEquals(1000L, cues[0].startMs)
@@ -100,6 +100,8 @@ class SubtitlePipelineTest {
         )
         assertEquals("srt", decoded.extension)
         assertEquals(1, SubtitlePipeline.parse(decoded.text, decoded.extension).size)
+        assertEquals(1500L, SubtitlePipeline.timeToMs("00:01.500"))
+        assertEquals(1500L, SubtitlePipeline.timeToMs("1.5s"))
     }
 
     @Test
