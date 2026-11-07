@@ -1223,11 +1223,9 @@ class MainActivity : ComponentActivity() {
     private fun setSubtitlesEnabledInternal(enabled: Boolean) {
         activeSubtitleEnabled = enabled
         nativePlayer?.let { player ->
-            // External subtitles are rendered as a synchronized overlay. Keep
-            // ExoPlayer's embedded text renderer disabled while that overlay
-            // owns subtitle presentation, otherwise native cue callbacks can
-            // replace the externally supplied cues on PlayerView.
-            val disableNativeTextTracks = activeSubtitleCues.isNotEmpty() || !enabled
+            // External and embedded subtitles are native Media3 text tracks.
+            // The text renderer is disabled only when the viewer turns subtitles off.
+            val disableNativeTextTracks = !enabled
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, disableNativeTextTracks)
                 .build()
@@ -1242,7 +1240,11 @@ class MainActivity : ComponentActivity() {
             subtitleRenderHandler.removeCallbacks(subtitleRenderRunnable)
             subtitleRenderHandler.post(subtitleRenderRunnable)
         }
-        notifySubtitleStateChanged(activeSubtitleEnabled, activeSubtitleLabel, activeSubtitleCues.isNotEmpty())
+        notifySubtitleStateChanged(
+            activeSubtitleEnabled,
+            activeSubtitleLabel,
+            activeSubtitleFile != null || activeSubtitleCues.isNotEmpty()
+        )
     }
 
     private fun toggleSubtitlesInternal(): Boolean {
@@ -1336,8 +1338,12 @@ class MainActivity : ComponentActivity() {
                     activeSubtitleFile = null
                     activeSubtitleLabel = ""
                     activeSubtitleEnabled = false
+                    player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                        .build()
                     notifySubtitleStateChanged(false, "", false)
-                    finishSubtitleActivation(false, "لم يتعرف المشغّل على صيغة ملف الترجمة")
+                    finishSubtitleActivation(false, "لم يتعرف المشغّل على مسار ملف الترجمة")
                 }
             }
             subtitleActivationTimeout = activationTimeout
@@ -1350,12 +1356,18 @@ class MainActivity : ComponentActivity() {
 
     private fun completeSubtitleActivationIfTrackAvailable(player: ExoPlayer, tracks: Tracks) {
         if (player !== nativePlayer || pendingSubtitleLabel.isBlank()) return
-        val textGroup = tracks.groups.firstOrNull { group ->
-            group.type == C.TRACK_TYPE_TEXT &&
-                (0 until group.length).any { index -> group.isTrackSupported(index) }
-        } ?: return
-        val trackIndex = (0 until textGroup.length).firstOrNull { textGroup.isTrackSupported(it) }
-            ?: return
+        val matchingTrack = tracks.groups.asSequence()
+            .filter { it.type == C.TRACK_TYPE_TEXT }
+            .flatMap { group ->
+                (0 until group.length).asSequence()
+                    .filter { group.isTrackSupported(it) }
+                    .map { index -> Triple(group, index, group.getTrackFormat(index)) }
+            }
+            .firstOrNull { (_, _, format) ->
+                format.label?.equals(pendingSubtitleLabel, ignoreCase = true) == true
+            } ?: return
+        val textGroup = matchingTrack.first
+        val trackIndex = matchingTrack.second
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_TEXT)
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
