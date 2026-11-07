@@ -1294,7 +1294,8 @@ class MainActivity : ComponentActivity() {
             val extension = file.extension.lowercase()
             val subtitleMimeType = when (extension) {
                 "vtt" -> MimeTypes.TEXT_VTT
-                "ass", "ssa" -> MimeTypes.TEXT_SSA
+                "ass" -> "text/x-ass"
+                "ssa" -> "text/x-ssa"
                 "ttml", "xml" -> MimeTypes.APPLICATION_TTML
                 else -> MimeTypes.APPLICATION_SUBRIP
             }
