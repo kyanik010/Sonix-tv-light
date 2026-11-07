@@ -2664,6 +2664,10 @@
       renderCategories();
       renderItems();
       if (currentSelectedItem && currentSelectedItem.streamUrl) videoPlaybackController.loadItem(currentSelectedItem);
+      if (window.innerWidth <= 600) {
+        const catCol = document.querySelector('.live-categories-col');
+        if (catCol) catCol.scrollIntoView({ behavior: 'smooth', inline: 'start' });
+      }
     }
 
     function getActiveCategoryList() {
@@ -2732,6 +2736,10 @@
       }
 
       renderItems();
+      if (window.innerWidth <= 600) {
+        const channelsCol = document.querySelector('.live-channels-col');
+        if (channelsCol) channelsCol.scrollIntoView({ behavior: 'smooth', inline: 'start' });
+      }
     }
 
     function renderItems(filterText = '') {
@@ -2862,6 +2870,10 @@
       if (!item.streamUrl) { showToast('رابط التشغيل غير متوفر من الخادم'); return; }
       videoPlaybackController.loadItem(item);
       if (currentAppMode === 'live') loadLiveEpg(item);
+      if (window.innerWidth <= 600) {
+        const playerCol = document.querySelector('.live-player-col');
+        if (playerCol) playerCol.scrollIntoView({ behavior: 'smooth', inline: 'start' });
+      }
     }
 
     function classifyAudioSource(name, categoryName, categoryId) {
@@ -3128,6 +3140,16 @@
       document.getElementById('live-channel-search').addEventListener('input', (e) => {
         renderItems(e.target.value.trim());
       });
+
+      const channelsHeader = document.querySelector('.channels-header-badge');
+      if (channelsHeader) {
+        channelsHeader.addEventListener('click', () => {
+          if (window.innerWidth <= 600) {
+            const catCol = document.querySelector('.live-categories-col');
+            if (catCol) catCol.scrollIntoView({ behavior: 'smooth', inline: 'start' });
+          }
+        });
+      }
 
       document.getElementById('audio-src-filter').addEventListener('input', (e) => {
         renderAudioSourcePicker(e.target.value.trim());
