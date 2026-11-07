@@ -1335,8 +1335,6 @@ class MainActivity : ComponentActivity() {
         return SubtitlePipeline.parse(source, file.extension)
     }
 
-    private fun subtitleTimeToMs(raw: String): Long? = SubtitlePipeline.timeToMs(raw)
-
     private fun notifyLocalSubtitleResult(success: Boolean, label: String, message: String) {
         val js = "window.SonixSubtitles && window.SonixSubtitles.onLocalSubtitleResult(" +
             success + "," + JSONObject.quote(label) + "," + JSONObject.quote(message) + ")"
@@ -1357,15 +1355,23 @@ class MainActivity : ComponentActivity() {
                 val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
             } ?: "subtitle.srt"
-            val ext = normalizeSubtitleExtension(name)
-            val rawBytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: throw IllegalStateException("تعذر قراءة الملف")
-            require(rawBytes.isNotEmpty() && rawBytes.size <= 20 * 1024 * 1024) { "ملف الترجمة فارغ أو أكبر من 20MB" }
-            val decodedText = decodeSubtitleText(rawBytes)
-            require(decodedText.isNotBlank()) { "تعذر فك ترميز ملف الترجمة" }
+            val rawBytes = contentResolver.openInputStream(uri)?.use { input ->
+                val output = ByteArrayOutputStream()
+                val buffer = ByteArray(8192)
+                var total = 0
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    total += count
+                    require(total <= 20 * 1024 * 1024) { "ملف الترجمة أكبر من 20MB" }
+                    output.write(buffer, 0, count)
+                }
+                output.toByteArray()
+            } ?: throw IllegalStateException("تعذر قراءة الملف")
+            val decoded = SubtitlePipeline.decodePayload(rawBytes, null, name)
             val folder = File(cacheDir, "subtitles").apply { mkdirs() }
-            val file = File(folder, "local_${System.currentTimeMillis()}.$ext")
-            file.writeText(decodedText, Charsets.UTF_8)
+            val file = File(folder, "local_${System.currentTimeMillis()}.${decoded.extension}")
+            file.writeText(decoded.text, Charsets.UTF_8)
             attachSubtitleFile(file, name.substringBeforeLast('.', name))
         } catch (error: Exception) {
             notifyLocalSubtitleResult(false, "", error.message ?: "تعذر قراءة ملف الترجمة")
