@@ -1968,12 +1968,20 @@
 
     function closeAllModals() {
       let closedFullscreenAudio = false;
+      let closedFullscreenSubtitles = false;
+
       document.querySelectorAll('.modal-backdrop').forEach(el => {
-        if (el.id === 'modal-ext-audio' && el.dataset.sonixFullscreenPortal === 'true') {
-          closedFullscreenAudio = true;
+        if (el.dataset.sonixFullscreenPortal === 'true') {
+          if (el.id === 'modal-ext-audio') closedFullscreenAudio = true;
+          if (el.id === 'modal-subtitles') closedFullscreenSubtitles = true;
         }
+
         el.classList.remove('active');
         el.setAttribute('aria-hidden', 'true');
+
+        // Restore fullscreen dialogs to their original modal layer before the
+        // player or another dialog takes focus. This keeps touch and D-pad
+        // navigation on the same visible UI tree on phones and Android TV.
         if (el.dataset.sonixFullscreenPortal === 'true' && el._sonixOriginalParent) {
           const parent = el._sonixOriginalParent;
           const next = el._sonixOriginalNextSibling;
@@ -1985,10 +1993,15 @@
         }
       });
 
-      if ((closedFullscreenAudio || closedSubtitlePopover) && videoPlaybackController && videoPlaybackController.isFullscreen) {
+      if ((closedFullscreenAudio || closedFullscreenSubtitles) &&
+          videoPlaybackController && videoPlaybackController.isFullscreen) {
         videoPlaybackController.showPlaybackControls();
+
         if (remoteNavigator) {
-          const returnButton = document.getElementById(closedSubtitlePopover ? 'btn-toggle-subtitles' : 'btn-open-ext-audio');
+          const returnButtonId = closedFullscreenSubtitles
+            ? 'btn-toggle-subtitles'
+            : 'btn-open-ext-audio';
+          const returnButton = document.getElementById(returnButtonId);
           if (returnButton) remoteNavigator.focusElement(returnButton);
         }
       }
