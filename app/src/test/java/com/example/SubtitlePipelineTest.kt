@@ -1,130 +1,124 @@
 package com.example
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
-import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
-import java.nio.ByteBuffer
 import java.nio.charset.Charset
-import java.nio.charset.CodingErrorAction
-import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 class SubtitlePipelineTest {
-
-    private fun decompressGzip(bytes: ByteArray): ByteArray {
-        if (bytes.size >= 2 && bytes[0] == 0x1f.toByte() && bytes[1] == 0x8b.toByte()) {
-            return GZIPInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
-        }
-        return bytes
+    @Test
+    fun parsesSrtWithCueNumbersAndMultilineText() {
+        val srt = "1\r\n00:00:01,000 --> 00:00:03,500\r\nمرحبا <i>بك</i>\r\nالسطر الثاني\r\n\r\n2\r\n00:00:04,000 --> 00:00:05,000\r\nNext"
+        val cues = SubtitlePipeline.parse(srt, "srt")
+        assertEquals(2, cues.size)
+        assertEquals(1000L, cues[0].startMs)
+        assertEquals(3500L, cues[0].endMs)
+        assertEquals("مرحبا بك\nالسطر الثاني", cues[0].text)
+        assertEquals("Next", cues[1].text)
     }
 
-    private fun decodeSubtitle(bytes: ByteArray): String {
-        val decompressed = decompressGzip(bytes)
-        if (decompressed.isEmpty()) return ""
-
-        // Check BOM
-        if (decompressed.size >= 3 && decompressed[0] == 0xEF.toByte() && decompressed[1] == 0xBB.toByte() && decompressed[2] == 0xBF.toByte()) {
-            return String(decompressed, 3, decompressed.size - 3, Charsets.UTF_8)
-        }
-        if (decompressed.size >= 2 && decompressed[0] == 0xFF.toByte() && decompressed[1] == 0xFE.toByte()) {
-            return String(decompressed, 2, decompressed.size - 2, Charsets.UTF_16LE)
-        }
-        if (decompressed.size >= 2 && decompressed[0] == 0xFE.toByte() && decompressed[1] == 0xFF.toByte()) {
-            return String(decompressed, 2, decompressed.size - 2, Charsets.UTF_16BE)
-        }
-
-        try {
-            val decoder = Charsets.UTF_8.newDecoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-            val charBuffer = decoder.decode(ByteBuffer.wrap(decompressed))
-            return charBuffer.toString()
-        } catch (_: Exception) {}
-
-        try {
-            val cp1256 = Charset.forName("windows-1256")
-            val decoded1256 = String(decompressed, cp1256)
-            if (decoded1256.any { it in '\u0600'..'\u06FF' }) {
-                return decoded1256
-            }
-        } catch (_: Exception) {}
-
-        return String(decompressed, Charsets.UTF_8)
+    @Test
+    fun parsesWebVttWithShortTimestampsCueIdsAndSettings() {
+        val vtt = "WEBVTT\n\nintro\n00:01.500 --> 00:03.000 align:start\nHello <c.yellow>world</c>\n\n00:00:04.000 --> 00:00:05.000\nSecond"
+        val cues = SubtitlePipeline.parse(vtt, "vtt")
+        assertEquals(2, cues.size)
+        assertEquals(1500L, cues[0].startMs)
+        assertEquals(3000L, cues[0].endMs)
+        assertEquals("Hello world", cues[0].text)
     }
 
-    private fun normalizeExt(raw: String): String {
-        var clean = raw.substringBefore('?').substringBefore('#').trim().lowercase()
-        if (clean.endsWith(".gz")) clean = clean.substringBeforeLast(".gz")
-        val ext = clean.substringAfterLast('.', "")
-        return when (ext) {
-            "srt", "vtt", "ssa", "ass", "ttml", "xml", "sub", "txt" -> ext
-            else -> "srt"
+    @Test
+    fun parsesAssDialogueWithCommaInSubtitleText() {
+        val ass = "[Script Info]\nTitle: Test\n[V4+ Styles]\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:03.50,Default,,0,0,0,,Hello, world\\Nsecond line"
+        val cues = SubtitlePipeline.parse(ass, "ass")
+        assertEquals(1, cues.size)
+        assertEquals(1000L, cues[0].startMs)
+        assertEquals("Hello, world\nsecond line", cues[0].text)
+    }
+
+    @Test
+    fun parsesTtmlTimedParagraphs() {
+        val xml = """<tt><body><div><p begin="00:00:01.000" end="00:00:02.500">Hello</p></div></body></tt>"""
+        val cues = SubtitlePipeline.parse(xml, "ttml")
+        assertEquals(1, cues.size)
+        assertEquals(1000L, cues[0].startMs)
+        assertEquals(2500L, cues[0].endMs)
+    }
+
+    @Test
+    fun decodesGzipAndDetectsVttFromPayload() {
+        val vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nArabic: مرحباً"
+        val output = ByteArrayOutputStream()
+        GZIPOutputStream(output).use { it.write(vtt.toByteArray(Charsets.UTF_8)) }
+        val decoded = SubtitlePipeline.decodePayload(
+            output.toByteArray(), null, "https://cdn.example/subtitle.gz"
+        )
+        assertEquals("vtt", decoded.extension)
+        assertTrue(decoded.text.contains("مرحباً"))
+        assertEquals(1, SubtitlePipeline.parse(decoded.text, decoded.extension).size)
+    }
+
+    @Test
+    fun decodesZipAndSelectsSubtitleEntryInsteadOfReadme() {
+        val output = ByteArrayOutputStream()
+        ZipOutputStream(output).use { zip ->
+            zip.putNextEntry(ZipEntry("README.txt"))
+            zip.write("not a subtitle".toByteArray(Charsets.UTF_8))
+            zip.closeEntry()
+            zip.putNextEntry(ZipEntry("Arabic/movie.vtt"))
+            zip.write("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nمرحبا".toByteArray(Charsets.UTF_8))
+            zip.closeEntry()
+        }
+        val decoded = SubtitlePipeline.decodePayload(
+            output.toByteArray(), null, "https://cdn.example/download?id=42"
+        )
+        assertEquals("vtt", decoded.extension)
+        assertTrue(decoded.fileName.endsWith("movie.vtt"))
+        assertEquals(1, SubtitlePipeline.parse(decoded.text, decoded.extension).size)
+    }
+
+    @Test
+    fun decodesWindows1256Arabic() {
+        val original = "هذه ترجمة عربية سليمة"
+        val bytes = original.toByteArray(Charset.forName("windows-1256"))
+        val decoded = SubtitlePipeline.decodePayload(bytes, null, "https://cdn.example/file.srt")
+        assertEquals(original, decoded.text)
+    }
+
+    @Test
+    fun honorsHttpGzipContentEncoding() {
+        val original = "1\n00:00:01,000 --> 00:00:02,000\nCompressed"
+        val output = ByteArrayOutputStream()
+        GZIPOutputStream(output).use { it.write(original.toByteArray(Charsets.UTF_8)) }
+        val decoded = SubtitlePipeline.decodePayload(
+            output.toByteArray(), "gzip", "https://cdn.example/no-extension"
+        )
+        assertEquals("srt", decoded.extension)
+        assertEquals(1, SubtitlePipeline.parse(decoded.text, decoded.extension).size)
+    }
+
+    @Test
+    fun rejectsHtmlErrorPagesInsteadOfReportingSuccessfulDownload() {
+        val html = "<!doctype html><html><body>Not found</body></html>"
+        assertThrows(IllegalArgumentException::class.java) {
+            SubtitlePipeline.decodePayload(
+                html.toByteArray(Charsets.UTF_8), null, "https://cdn.example/subtitle"
+            )
         }
     }
 
     @Test
-    fun decompressGzip_decompressesValidGzipStream() {
-        val originalText = "1\n00:00:01,000 --> 00:00:03,000\nمرحبا بك في SONIX TV\n"
-        val bos = ByteArrayOutputStream()
-        GZIPOutputStream(bos).use { it.write(originalText.toByteArray(Charsets.UTF_8)) }
-        val compressed = bos.toByteArray()
-
-        assertTrue(compressed[0] == 0x1f.toByte())
-        assertTrue(compressed[1] == 0x8b.toByte())
-
-        val decompressed = decompressGzip(compressed)
-        val decoded = String(decompressed, Charsets.UTF_8)
-        assertEquals(originalText, decoded)
-    }
-
-    @Test
-    fun decodeSubtitle_decodesWindows1256ArabicCorrectly() {
-        val arabicText = "أهلاً وسهلاً بك في البث المباشر"
-        val cp1256 = Charset.forName("windows-1256")
-        val cp1256Bytes = arabicText.toByteArray(cp1256)
-
-        val decoded = decodeSubtitle(cp1256Bytes)
-        assertEquals(arabicText, decoded)
-    }
-
-    @Test
-    fun decodeSubtitle_handlesGzippedWindows1256Arabic() {
-        val arabicSrt = "1\n00:01:00,000 --> 00:01:05,000\nهذه ترجمة عربية مضغوطة\n"
-        val cp1256 = Charset.forName("windows-1256")
-        val bos = ByteArrayOutputStream()
-        GZIPOutputStream(bos).use { it.write(arabicSrt.toByteArray(cp1256)) }
-        val compressed = bos.toByteArray()
-
-        val decoded = decodeSubtitle(compressed)
-        assertTrue(decoded.contains("هذه ترجمة عربية مضغوطة"))
-    }
-
-    @Test
-    fun decodeSubtitle_stripsUtf8Bom() {
+    fun supportsUtf8BomAndExtensionNormalization() {
         val text = "1\n00:00:01,000 --> 00:00:02,000\nHello"
         val bytes = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()) + text.toByteArray(Charsets.UTF_8)
-
-        val decoded = decodeSubtitle(bytes)
-        assertFalse(decoded.startsWith("\uFEFF"))
-        assertEquals(text, decoded)
-    }
-
-    @Test
-    fun normalizeExt_stripsGzAndQueryParameters() {
-        assertEquals("srt", normalizeExt("https://opensubtitles.org/sub/12345.srt.gz?token=abc"))
-        assertEquals("vtt", normalizeExt("subtitles.vtt.gz"))
-        assertEquals("ass", normalizeExt("subtitles.ass"))
-        assertEquals("srt", normalizeExt("archive.unknown"))
-    }
-
-    @Test
-    fun srtCrlfReplacement_normalizesLineBreaks() {
-        val crlfText = "1\r\n00:00:01,000 --> 00:00:02,000\r\nLine 1\r\nLine 2\r\n\r\n2\r\n"
-        val normalized = crlfText.replace("\r\n", "\n").replace('\r', '\n')
-        assertFalse(normalized.contains("\r"))
-        assertTrue(normalized.contains("\nLine 1\nLine 2\n\n2\n"))
+        val decoded = SubtitlePipeline.decodePayload(bytes, null, "https://cdn.example/file.srt?token=1")
+        assertEquals(text, decoded.text)
+        assertEquals("srt", decoded.extension)
+        assertEquals("vtt", SubtitlePipeline.normalizeExtension("file.vtt.gz?token=abc"))
     }
 }
