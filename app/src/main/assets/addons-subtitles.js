@@ -61,9 +61,23 @@
         reject(new Error('خدمة الاتصال غير متاحة')); return;
       }
       const id = 'sonix_sub_' + (++nativeRequestSequence);
-      pendingNativeRequests.set(id,{resolve,reject});
+      const timeoutMs = method === 'applySubtitleAsync' ? 65000 : 30000;
+      const timer = setTimeout(() => {
+        const pending = pendingNativeRequests.get(id);
+        if (!pending) return;
+        pendingNativeRequests.delete(id);
+        reject(new Error(method === 'applySubtitleAsync'
+          ? 'انتهت مهلة تنزيل الترجمة أو تفعيلها. تحقق من اتصال المصدر ثم حاول مجدداً.'
+          : 'انتهت مهلة الاتصال بمصدر الإضافة.'));
+      }, timeoutMs);
+      pendingNativeRequests.set(id,{resolve,reject,timer});
       try { window.NativePlayback[method](...args,id); }
-      catch (error) { pendingNativeRequests.delete(id); reject(error); }
+      catch (error) {
+        const pending = pendingNativeRequests.get(id);
+        if (pending) clearTimeout(pending.timer);
+        pendingNativeRequests.delete(id);
+        reject(error);
+      }
     });
   }
   async function nativeText(url) {
@@ -615,6 +629,7 @@
     onNativeResponse: function (requestId, payload) {
       const pending = pendingNativeRequests.get(requestId);
       if (!pending) return;
+      clearTimeout(pending.timer);
       pendingNativeRequests.delete(requestId);
       try {
         const value = JSON.parse(payload || '{}');
