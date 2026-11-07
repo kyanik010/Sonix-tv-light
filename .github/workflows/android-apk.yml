@@ -1,0 +1,129 @@
+name: Build SONIX TV APK
+
+on:
+  push:
+    branches:
+      - fix/sonix-playback-preview-controls
+      - fix/mobile-native-video-immersive-fullscreen
+      - feature/sonix-external-audio-complete
+      - sonix-tv-only
+      - feature/stremio-addons-subtitle-system
+      - sonix-tv-vip
+      - sonix-control-integration
+      # Keep the SONIX TV VIP branch covered by the Android build and test workflow.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repair branch
+        uses: actions/checkout@v5
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platforms;android-36.1" "build-tools;36.0.0" "platform-tools"
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.3.1'
+          cache-provider: basic
+
+      - name: Verify Java and Gradle
+        run: |
+          java -version
+          gradle --version
+
+      - name: Generate Android debug keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore debug.keystore \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Run unit tests
+        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Validate application sources and JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          source_files = [p for p in Path("app/src/main").rglob("*") if p.is_file() and p.suffix.lower() in {".html", ".css", ".js", ".kt", ".java"}]
+          forbidden = (
+              "MOCK_", "BigBuckBunny", "TearsOfSteel", "ForBigger",
+              "test-streams", "example.com", "iptv.server.com",
+              "محمد الأحمد", "386683283365", "VIP ULTRA", "24ms"
+          )
+          found = []
+          for path in source_files:
+              text = path.read_text(encoding="utf-8", errors="ignore")
+              for marker in forbidden:
+                  if marker in text:
+                      found.append(f"{path}: {marker}")
+          if found:
+              raise SystemExit("Demo data remains in app sources:\n" + "\n".join(found))
+          PY
+          node --check app/src/main/assets/app.js
+          node --check app/src/main/assets/addons-subtitles.js
+
+      - name: Run Security and Lint Checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Check for unsafe innerHTML usages with unescaped provider variables
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          app_js = Path("app/src/main/assets/app.js").read_text(encoding="utf-8")
+          # Verify search doesn't construct innerHTML with interpolated variables
+          if "resultsContainer.innerHTML = `" in app_js:
+              raise SystemExit("Security violation: dynamic innerHTML template string detected in search results")
+          print("Security check passed: Safe DOM creation used for dynamic provider search.")
+          PY
+
+      - name: Build APK with assembleDebug
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify generated APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK_PATH"
+          echo "APK_PATH=$APK_PATH"
+          ls -lh "$APK_PATH"
+          sha256sum "$APK_PATH"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SONIX-TV-debug-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

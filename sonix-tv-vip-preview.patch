@@ -1,0 +1,938 @@
+From de2b10f3554e0ce9cc9fa3659a3683b3e246bc2a Mon Sep 17 00:00:00 2001
+From: kyanik010 <kyaniky01@gmail.com>
+Date: Fri, 6 Nov 2026 20:40:43 +0000
+Subject: [PATCH] feat(preview): add professional item preview panel for
+ movies, series, and channels below video viewport
+
+---
+ app/src/main/assets/app.js                    | 398 +++++++++++++++++-
+ app/src/main/assets/sonix_tv.html             |  16 +
+ app/src/main/assets/styles.css                | 363 ++++++++++++++++
+ app/src/main/java/com/example/MainActivity.kt |  10 +
+ app/src/main/java/com/example/XtreamBridge.kt |  40 ++
+ 5 files changed, 825 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/main/assets/app.js b/app/src/main/assets/app.js
+index 007fbcf..dc3b73e 100644
+--- a/app/src/main/assets/app.js
++++ b/app/src/main/assets/app.js
+@@ -741,6 +741,373 @@
+     window.onExternalAudioPlaying = function() { if (dualAudioEngine) dualAudioEngine.onPlaying(); };
+     window.onExternalAudioError = function(message) { if (dualAudioEngine) dualAudioEngine.onFailure(message); };
+     window.onExternalAudioStopped = function() { if (dualAudioEngine && dualAudioEngine.isActive) dualAudioEngine.stopExternalAudio(false, false); };
++
++    /**
++     * =========================================================================
++     * SECTION 7.5: PROFESSIONAL ITEM PREVIEW PANEL ENGINE (SONIX TV)
++     * =========================================================================
++     */
++    const previewDetailsCache = new Map(); // key: `${mode}:${id}` -> cached details object
++    let previewDebounceTimer = null;
++    let previewCurrentToken = 0;
++    let previewActiveRequestId = null;
++    let previewLastRenderedKey = null;
++
++    function escapeHtml(str) {
++      if (!str) return '';
++      return String(str)
++        .replace(/&/g, '&amp;')
++        .replace(/</g, '&lt;')
++        .replace(/>/g, '&gt;')
++        .replace(/"/g, '&quot;')
++        .replace(/'/g, '&#39;');
++    }
++
++    function decodeEpgText(val) {
++      if (!val) return '';
++      try {
++        return decodeURIComponent(escape(atob(val)));
++      } catch (_) {
++        return String(val);
++      }
++    }
++
++    function formatEpgTime(timestampSec) {
++      if (!timestampSec || isNaN(timestampSec) || timestampSec <= 0) return '';
++      try {
++        const d = new Date(timestampSec * 1000);
++        let hours = d.getHours();
++        let mins = d.getMinutes();
++        const ampm = hours >= 12 ? 'م' : 'ص';
++        hours = hours % 12;
++        if (hours === 0) hours = 12;
++        const minsStr = mins < 10 ? '0' + mins : String(mins);
++        return `${hours}:${minsStr} ${ampm}`;
++      } catch (_) {
++        return '';
++      }
++    }
++
++    function parseProgramTimestamps(prog) {
++      let startSec = Number(prog.start_timestamp);
++      let stopSec = Number(prog.stop_timestamp);
++      if (isNaN(startSec) || startSec <= 0) {
++        if (prog.start) {
++          const d = new Date(String(prog.start).replace(/-/g, '/'));
++          if (!isNaN(d.getTime())) startSec = Math.floor(d.getTime() / 1000);
++        }
++      }
++      if (isNaN(stopSec) || stopSec <= 0) {
++        if (prog.end) {
++          const d = new Date(String(prog.end).replace(/-/g, '/'));
++          if (!isNaN(d.getTime())) stopSec = Math.floor(d.getTime() / 1000);
++        }
++      }
++      return { startSec, stopSec };
++    }
++
++    function calculateCurrentAndNextEpg(listings) {
++      if (!Array.isArray(listings) || !listings.length) return null;
++      const nowSec = Math.floor(Date.now() / 1000);
++      let currentProg = null;
++      let nextProg = null;
++
++      for (let i = 0; i < listings.length; i++) {
++        const prog = listings[i];
++        const { startSec, stopSec } = parseProgramTimestamps(prog);
++        if (startSec > 0 && stopSec > 0) {
++          if (nowSec >= startSec && nowSec < stopSec) {
++            currentProg = {
++              title: decodeEpgText(prog.title),
++              desc: decodeEpgText(prog.description),
++              timeWindow: `${formatEpgTime(startSec)} - ${formatEpgTime(stopSec)}`,
++              startSec,
++              stopSec
++            };
++            if (i + 1 < listings.length) {
++              const nextRaw = listings[i + 1];
++              const nextTimes = parseProgramTimestamps(nextRaw);
++              nextProg = {
++                title: decodeEpgText(nextRaw.title),
++                time: formatEpgTime(nextTimes.startSec)
++              };
++            }
++            break;
++          }
++        }
++      }
++
++      if (!currentProg && listings.length > 0) {
++        const first = listings[0];
++        const firstTimes = parseProgramTimestamps(first);
++        const timeWindow = (firstTimes.startSec > 0 && firstTimes.stopSec > 0)
++          ? `${formatEpgTime(firstTimes.startSec)} - ${formatEpgTime(firstTimes.stopSec)}`
++          : '';
++        currentProg = {
++          title: decodeEpgText(first.title),
++          desc: decodeEpgText(first.description),
++          timeWindow
++        };
++        if (listings.length > 1) {
++          const sec = listings[1];
++          const secTimes = parseProgramTimestamps(sec);
++          nextProg = {
++            title: decodeEpgText(sec.title),
++            time: formatEpgTime(secTimes.startSec)
++          };
++        }
++      }
++
++      return { current: currentProg, next: nextProg };
++    }
++
++    function renderItemPreview(item, mode, extraDetails = null) {
++      const container = document.getElementById('sonix-preview-content');
++      if (!container || !item) return;
++
++      if (mode === 'movies' || mode === 'series') {
++        const isMovie = mode === 'movies';
++        const typeLabel = isMovie ? 'فيلم' : 'مسلسل';
++        const name = item.name || '';
++        const posterUrl = (extraDetails && extraDetails.poster) || item.logo || '';
++        const year = (extraDetails && extraDetails.year) || item.year || '';
++        const genre = (extraDetails && extraDetails.genre) || item.genre || item.categoryName || '';
++        const rating = (extraDetails && extraDetails.rating) || item.rating || '';
++        const plot = (extraDetails && extraDetails.plot) || item.desc || '';
++
++        let badgesHtml = `<span class="preview-badge preview-badge-type">${typeLabel}</span>`;
++        if (year && String(year).trim()) {
++          badgesHtml += `<span class="preview-badge preview-badge-year">${escapeHtml(year)}</span>`;
++        }
++        if (genre && String(genre).trim() && !genre.startsWith('movie-') && !genre.startsWith('series-')) {
++          badgesHtml += `<span class="preview-badge preview-badge-genre">${escapeHtml(genre)}</span>`;
++        }
++        if (rating && String(rating).trim() && String(rating) !== '0') {
++          const numRating = Number(rating);
++          const ratingText = !isNaN(numRating) ? numRating.toFixed(1) : String(rating);
++          badgesHtml += `<span class="preview-badge preview-badge-rating">
++            <svg viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
++            ${escapeHtml(ratingText)}
++          </span>`;
++        }
++
++        let posterHtml = '';
++        if (posterUrl) {
++          posterHtml = `
++            <div class="preview-poster-wrapper">
++              <img class="preview-poster-img" src="${escapeHtml(posterUrl)}" alt="${escapeHtml(name)}"
++                   onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';" />
++              <div class="preview-poster-fallback" style="display:none;">
++                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg>
++                <span>${escapeHtml(name)}</span>
++              </div>
++            </div>`;
++        } else {
++          posterHtml = `
++            <div class="preview-poster-wrapper">
++              <div class="preview-poster-fallback">
++                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg>
++                <span>${escapeHtml(name)}</span>
++              </div>
++            </div>`;
++        }
++
++        let plotHtml = '';
++        if (plot && String(plot).trim()) {
++          plotHtml = `
++            <div class="preview-plot-box">
++              <p class="preview-plot-text">${escapeHtml(plot)}</p>
++            </div>`;
++        }
++
++        container.innerHTML = `
++          <div class="preview-vod-card">
++            <div class="preview-vod-header">
++              ${posterHtml}
++              <div class="preview-vod-meta">
++                <h3 class="preview-title">${escapeHtml(name)}</h3>
++                <div class="preview-badges-row">${badgesHtml}</div>
++              </div>
++            </div>
++            ${plotHtml}
++          </div>`;
++      } else {
++        const name = item.name || '';
++        const logoUrl = item.logo || '';
++        const number = item.number || '';
++        const categoryName = item.categoryName || '';
++
++        let badgesHtml = '';
++        if (number && String(number).trim()) {
++          badgesHtml += `<span class="preview-badge preview-badge-category">CH ${escapeHtml(String(number))}</span>`;
++        }
++        if (categoryName && String(categoryName).trim() && !categoryName.startsWith('live-')) {
++          badgesHtml += `<span class="preview-badge preview-badge-category">${escapeHtml(categoryName)}</span>`;
++        }
++
++        let logoHtml = '';
++        if (logoUrl) {
++          logoHtml = `
++            <div class="preview-channel-logo-wrapper">
++              <img class="preview-channel-logo-img" src="${escapeHtml(logoUrl)}" alt="${escapeHtml(name)}"
++                   onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='block';" />
++              <div class="preview-channel-logo-fallback" style="display:none;">${escapeHtml(name.substring(0, 3))}</div>
++            </div>`;
++        } else {
++          logoHtml = `
++            <div class="preview-channel-logo-wrapper">
++              <div class="preview-channel-logo-fallback">${escapeHtml(name.substring(0, 3))}</div>
++            </div>`;
++        }
++
++        let epgContentHtml = '';
++        if (extraDetails && extraDetails.epg && extraDetails.epg.current) {
++          const curr = extraDetails.epg.current;
++          const next = extraDetails.epg.next;
++          let timeSpan = curr.timeWindow ? `<span class="preview-epg-time">${escapeHtml(curr.timeWindow)}</span>` : '';
++          let nextHtml = '';
++          if (next && next.title) {
++            let nextTime = next.time ? ` (${escapeHtml(next.time)})` : '';
++            nextHtml = `
++              <div class="preview-epg-next">
++                <div class="preview-epg-next-label">البرنامج التالي${nextTime}:</div>
++                <div class="preview-epg-next-title">${escapeHtml(next.title)}</div>
++              </div>`;
++          }
++
++          epgContentHtml = `
++            <div class="preview-epg-box">
++              <div class="preview-epg-current">
++                <div class="preview-epg-label-row">
++                  <div class="preview-epg-tag-group">
++                    <span class="preview-live-dot"></span>
++                    <span class="preview-epg-label">البرنامج الحالي:</span>
++                  </div>
++                  ${timeSpan}
++                </div>
++                <div class="preview-epg-title">${escapeHtml(curr.title || 'بث مباشر')}</div>
++              </div>
++              ${nextHtml}
++            </div>`;
++        } else {
++          epgContentHtml = `
++            <div class="preview-epg-box">
++              <div class="preview-epg-live-note">
++                <span class="preview-live-dot"></span>
++                <span>بث مباشر للقناة</span>
++              </div>
++            </div>`;
++        }
++
++        container.innerHTML = `
++          <div class="preview-channel-card">
++            <div class="preview-channel-header">
++              ${logoHtml}
++              <div class="preview-channel-meta">
++                <h3 class="preview-channel-name">${escapeHtml(name)}</h3>
++                <div class="preview-badges-row">${badgesHtml}</div>
++              </div>
++            </div>
++            ${epgContentHtml}
++          </div>`;
++      }
++    }
++
++    function handleItemFocusForPreview(element) {
++      if (!element) return;
++      const row = element.closest('.channel-row');
++      if (!row) return;
++      const itemId = row.dataset.itemId;
++      if (!itemId) return;
++
++      const items = getActiveItemList();
++      const item = items.find(it => String(it.id) === String(itemId));
++      if (!item) return;
++
++      const mode = currentAppMode;
++      const cacheKey = `${mode}:${itemId}`;
++      const token = ++previewCurrentToken;
++
++      const cached = previewDetailsCache.get(cacheKey);
++      renderItemPreview(item, mode, cached || null);
++      previewLastRenderedKey = cacheKey;
++
++      if (cached && (cached.fullyLoaded || cached.epg)) return;
++
++      if (previewDebounceTimer) {
++        clearTimeout(previewDebounceTimer);
++        previewDebounceTimer = null;
++      }
++
++      previewDebounceTimer = setTimeout(() => {
++        if (token !== previewCurrentToken) return;
++
++        if (!window.XtreamBridge || typeof window.XtreamBridge.requestDetailsAsync !== 'function') return;
++
++        if (previewActiveRequestId) {
++          try { window.XtreamBridge.cancelDetailsLoad(previewActiveRequestId); } catch (_) {}
++          previewActiveRequestId = null;
++        }
++
++        const requestId = `prev-${mode}-${itemId}-${Date.now()}`;
++        previewActiveRequestId = requestId;
++
++        if (mode === 'movies') {
++          window.XtreamBridge.requestDetailsAsync('get_vod_info', 'vod_id', itemId, requestId);
++        } else if (mode === 'series') {
++          window.XtreamBridge.requestDetailsAsync('get_series_info', 'series_id', itemId, requestId);
++        } else if (mode === 'live') {
++          window.XtreamBridge.requestDetailsAsync('get_short_epg', 'stream_id', itemId, requestId);
++        }
++      }, 250);
++    }
++
++    window.onXtreamDetailsLoaded = function(requestId, rawResult) {
++      let response;
++      try {
++        response = typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
++      } catch (_) {
++        return;
++      }
++
++      if (!response || !response.success || !response.data) return;
++
++      const action = response.action;
++      const targetId = String(response.id || '');
++      let mode = 'live';
++      if (action === 'get_vod_info') mode = 'movies';
++      else if (action === 'get_series_info') mode = 'series';
++
++      const cacheKey = `${mode}:${targetId}`;
++      let detailObj = {};
++
++      if (mode === 'movies' || mode === 'series') {
++        const info = response.data.info || {};
++        const year = info.year || (info.release_date ? String(info.release_date).substring(0, 4) : '') ||
++                     (info.releasedate ? String(info.releasedate).substring(0, 4) : '') ||
++                     (info.releaseDate ? String(info.releaseDate).substring(0, 4) : '') || '';
++        const genre = info.genre || '';
++        const rating = info.rating || info.rating_5based || '';
++        const plot = info.plot || info.description || '';
++        const poster = info.movie_image || info.cover || '';
++        detailObj = { year, genre, rating, plot, poster, fullyLoaded: true };
++      } else if (mode === 'live') {
++        const listings = response.data.epg_listings || [];
++        const epgData = calculateCurrentAndNextEpg(listings);
++        detailObj = { epg: epgData, fullyLoaded: true };
++      }
++
++      previewDetailsCache.set(cacheKey, detailObj);
++
++      if (previewLastRenderedKey === cacheKey) {
++        const items = getActiveItemList();
++        const activeItem = items.find(it => String(it.id) === targetId);
++        if (activeItem) {
++          renderItemPreview(activeItem, mode, detailObj);
++        }
++      }
++    };
++
+     /**
+      * =========================================================================
+      * SECTION 8: D-PAD & TV REMOTE SPATIAL NAVIGATION SYSTEM
+@@ -1227,6 +1594,9 @@
+         } catch (err) {
+           console.warn('focusElement non-critical error', err);
+         }
++        if (typeof handleItemFocusForPreview === 'function') {
++          handleItemFocusForPreview(element);
++        }
+       }
+     }
+ 
+@@ -1515,10 +1885,10 @@
+         liveChannels=payload.items.map((x,i)=>({id:String(x.stream_id),number:i+1,name:x.name||'قناة',category:x.category_id==null?'':'live-'+x.category_id,categoryName:names.get(String(x.category_id))||'',logo:x.stream_icon||'',logoText:'',streamUrl:'',epgChannelId:x.epg_channel_id||'',containerExtension:x.container_extension||'ts'}));
+       }else if(section==='movies'){
+         movieCategories=orderCategories([{id:'all',name:'جميع الأفلام'},...categories,{id:'favorites',name:'المفضلة'}],'جميع الأفلام');
+-        movies=payload.items.map((x,i)=>({id:String(x.stream_id),number:i+1,name:x.name||'فيلم',category:x.category_id==null?'':'movie-'+x.category_id,categoryName:names.get(String(x.category_id))||'',logo:x.stream_icon||'',logoText:'',streamUrl:'',rating:x.rating||'',desc:x.plot||'',containerExtension:x.container_extension||'mp4'}));
++        movies=payload.items.map((x,i)=>({id:String(x.stream_id),number:i+1,name:x.name||'فيلم',category:x.category_id==null?'':'movie-'+x.category_id,categoryName:names.get(String(x.category_id))||'',logo:x.stream_icon||'',logoText:'',streamUrl:'',rating:x.rating||'',desc:x.plot||'',year:x.year||(x.release_date?String(x.release_date).substring(0,4):'')||'',genre:x.genre||'',containerExtension:x.container_extension||'mp4'}));
+       }else{
+         seriesCategories=orderCategories([{id:'all',name:'جميع المسلسلات'},...categories,{id:'favorites',name:'المفضلة'}],'جميع المسلسلات');
+-        series=payload.items.map((x,i)=>({id:String(x.series_id),seriesId:String(x.series_id),number:i+1,name:x.name||'مسلسل',category:x.category_id==null?'':'series-'+x.category_id,categoryName:names.get(String(x.category_id))||'',logo:x.cover||'',logoText:'',streamUrl:'',rating:x.rating||'',desc:x.plot||''}));
++        series=payload.items.map((x,i)=>({id:String(x.series_id),seriesId:String(x.series_id),number:i+1,name:x.name||'مسلسل',category:x.category_id==null?'':'series-'+x.category_id,categoryName:names.get(String(x.category_id))||'',logo:x.cover||'',logoText:'',streamUrl:'',rating:x.rating||'',desc:x.plot||'',year:x.releaseDate?String(x.releaseDate).substring(0,4):(x.year||''),genre:x.genre||''}));
+       }
+       catalogSavedAt[section]=Number(payload.savedAt||Date.now());
+       if(currentAppMode===config.mode){currentActiveCategory='all';renderCategories();renderItems();if(section==='live')renderAudioSourcePicker();}
+@@ -1821,6 +2191,22 @@
+           playerPanel.classList.remove('has-active-playback');
+           playerPanel.classList.toggle('is-live-mode', mode === 'live');
+         }
++        previewLastRenderedKey = null;
++        const previewContent = document.getElementById('sonix-preview-content');
++        if (previewContent) {
++          const sectionLabel = mode === 'movies' ? 'الأفلام' : (mode === 'series' ? 'المسلسلات' : 'القنوات');
++          previewContent.innerHTML = `
++            <div class="preview-idle-state">
++              <div class="preview-idle-icon">
++                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
++                  <rect x="2" y="7" width="20" height="15" rx="2" ry="2"/>
++                  <polyline points="17 2 12 7 7 2"/>
++                </svg>
++              </div>
++              <div class="preview-idle-title">معاينة ${sectionLabel}</div>
++              <div class="preview-idle-desc">تصفح العناصر بالريموت لعرض التفاصيل الكاملة</div>
++            </div>`;
++        }
+       }
+       currentAppMode = mode;
+       const itemsContainer = document.getElementById('channels-list-container');
+@@ -1978,6 +2364,14 @@
+         }, { passive: true });
+         container.dataset.incrementalScrollBound = 'true';
+       }
++      if (!container.dataset.previewFocusBound) {
++        container.addEventListener('focusin', (e) => {
++          if (typeof handleItemFocusForPreview === 'function') {
++            handleItemFocusForPreview(e.target);
++          }
++        });
++        container.dataset.previewFocusBound = 'true';
++      }
+       // Render only the first batch. Further batches are requested by actual
+       // scrolling or by DPAD navigation at the end of the rendered rows.
+       appendChannelRows();
+diff --git a/app/src/main/assets/sonix_tv.html b/app/src/main/assets/sonix_tv.html
+index 1f8f7be..bc79de4 100644
+--- a/app/src/main/assets/sonix_tv.html
++++ b/app/src/main/assets/sonix_tv.html
+@@ -383,6 +383,22 @@
+           </div>
+           </div>
+ 
++          <!-- SONIX Professional Item Preview Panel (لوحة معاينة الأفلام والمسلسلات والقنوات) -->
++          <div id="sonix-preview-panel" class="sonix-preview-panel" aria-live="polite">
++            <div id="sonix-preview-content" class="preview-content">
++              <div class="preview-idle-state">
++                <div class="preview-idle-icon">
++                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
++                    <rect x="2" y="7" width="20" height="15" rx="2" ry="2"/>
++                    <polyline points="17 2 12 7 7 2"/>
++                  </svg>
++                </div>
++                <div class="preview-idle-title">SONIX TV</div>
++                <div class="preview-idle-desc">تصفح القنوات أو الأفلام أو المسلسلات بالريموت لمعاينة التفاصيل</div>
++              </div>
++            </div>
++          </div>
++
+           <!-- Preview mode: keep only the existing preview and these two actions below it. -->
+           <div class="player-preview-actions">
+             <button id="btn-toggle-fav" class="action-btn focusable" title="إضافة للمفضلة">
+diff --git a/app/src/main/assets/styles.css b/app/src/main/assets/styles.css
+index e755a4c..0e8e6a6 100644
+--- a/app/src/main/assets/styles.css
++++ b/app/src/main/assets/styles.css
+@@ -890,6 +890,369 @@
+       border: 1px solid var(--border-panel);
+       cursor: pointer;
+     }
++
++    /* ==========================================================================
++       SONIX PROFESSIONAL ITEM PREVIEW PANEL (Below Video Viewport)
++       ========================================================================== */
++    .sonix-preview-panel {
++      position: relative;
++      display: flex;
++      flex-direction: column;
++      flex: 1 1 auto;
++      min-height: 0;
++      width: 100%;
++      background: rgba(14, 20, 28, 0.78);
++      border: 1px solid var(--border-panel);
++      border-radius: 14px;
++      padding: clamp(10px, 1.4vh, 14px);
++      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
++      backdrop-filter: blur(12px);
++      -webkit-backdrop-filter: blur(12px);
++      overflow-y: auto;
++      overflow-x: hidden;
++      box-sizing: border-box;
++      transition: border-color 0.2s ease, box-shadow 0.2s ease;
++    }
++    .sonix-preview-panel::-webkit-scrollbar {
++      width: 4px;
++    }
++    .sonix-preview-panel::-webkit-scrollbar-thumb {
++      background: var(--border-panel);
++      border-radius: 4px;
++    }
++
++    .preview-content {
++      display: flex;
++      flex-direction: column;
++      gap: 10px;
++      width: 100%;
++      height: 100%;
++      animation: previewFadeIn 0.2s ease-out;
++    }
++    @keyframes previewFadeIn {
++      from { opacity: 0; transform: translateY(4px); }
++      to { opacity: 1; transform: translateY(0); }
++    }
++
++    /* Idle / Placeholder State */
++    .preview-idle-state {
++      display: flex;
++      flex-direction: column;
++      align-items: center;
++      justify-content: center;
++      text-align: center;
++      padding: 30px 16px;
++      gap: 10px;
++      color: var(--text-muted);
++      height: 100%;
++      min-height: 180px;
++    }
++    .preview-idle-icon {
++      width: 48px;
++      height: 48px;
++      color: var(--text-silver);
++      opacity: 0.6;
++    }
++    .preview-idle-icon svg {
++      width: 100%;
++      height: 100%;
++    }
++    .preview-idle-title {
++      font-size: 1.15rem;
++      font-weight: 700;
++      color: var(--text-white);
++      letter-spacing: 0.5px;
++    }
++    .preview-idle-desc {
++      font-size: 0.82rem;
++      color: var(--text-silver);
++      line-height: 1.4;
++      max-width: 240px;
++    }
++
++    /* VOD / Series Card */
++    .preview-vod-card {
++      display: flex;
++      flex-direction: column;
++      gap: 10px;
++      width: 100%;
++    }
++    .preview-vod-header {
++      display: flex;
++      flex-direction: row;
++      gap: 12px;
++      align-items: flex-start;
++      width: 100%;
++    }
++    .preview-poster-wrapper {
++      position: relative;
++      flex: 0 0 clamp(82px, 9vw, 110px);
++      width: clamp(82px, 9vw, 110px);
++      aspect-ratio: 2 / 3;
++      border-radius: 10px;
++      overflow: hidden;
++      background: #0d131a;
++      border: 1px solid rgba(255, 255, 255, 0.1);
++      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.6);
++    }
++    .preview-poster-img {
++      width: 100%;
++      height: 100%;
++      object-fit: cover;
++      display: block;
++    }
++    .preview-poster-fallback {
++      display: flex;
++      flex-direction: column;
++      align-items: center;
++      justify-content: center;
++      width: 100%;
++      height: 100%;
++      background: linear-gradient(145deg, #16202c, #0d131a);
++      color: var(--text-muted);
++      font-size: 0.75rem;
++      text-align: center;
++      padding: 6px;
++    }
++    .preview-poster-fallback svg {
++      width: 32px;
++      height: 32px;
++      margin-bottom: 4px;
++      opacity: 0.5;
++    }
++
++    .preview-vod-meta {
++      display: flex;
++      flex-direction: column;
++      gap: 6px;
++      flex: 1 1 auto;
++      min-width: 0;
++    }
++    .preview-title {
++      font-size: clamp(0.95rem, 1.25vw, 1.15rem);
++      font-weight: 700;
++      color: var(--text-white);
++      line-height: 1.35;
++      display: -webkit-box;
++      -webkit-line-clamp: 2;
++      -webkit-box-orient: vertical;
++      overflow: hidden;
++      text-overflow: ellipsis;
++      word-break: break-word;
++    }
++    .preview-badges-row {
++      display: flex;
++      flex-wrap: wrap;
++      align-items: center;
++      gap: 5px;
++    }
++    .preview-badge {
++      display: inline-flex;
++      align-items: center;
++      gap: 4px;
++      font-size: 0.72rem;
++      font-weight: 600;
++      padding: 2px 7px;
++      border-radius: 6px;
++      background: rgba(255, 255, 255, 0.07);
++      color: var(--text-silver);
++      border: 1px solid rgba(255, 255, 255, 0.06);
++    }
++    .preview-badge-type {
++      background: rgba(224, 165, 38, 0.16);
++      color: var(--accent-gold);
++      border-color: rgba(224, 165, 38, 0.35);
++    }
++    .preview-badge-rating {
++      background: rgba(245, 166, 35, 0.18);
++      color: #FFC107;
++      border-color: rgba(255, 193, 7, 0.3);
++    }
++    .preview-badge-rating svg {
++      width: 11px;
++      height: 11px;
++      fill: currentColor;
++    }
++    .preview-badge-year {
++      color: #93C5FD;
++      background: rgba(59, 130, 246, 0.12);
++      border-color: rgba(59, 130, 246, 0.25);
++    }
++    .preview-badge-genre {
++      color: #A7F3D0;
++      background: rgba(16, 185, 129, 0.12);
++      border-color: rgba(16, 185, 129, 0.25);
++    }
++    .preview-badge-category {
++      color: var(--text-silver);
++      background: rgba(255, 255, 255, 0.08);
++    }
++
++    .preview-plot-box {
++      width: 100%;
++      background: rgba(10, 15, 22, 0.5);
++      border-radius: 8px;
++      padding: 8px 10px;
++      border: 1px solid rgba(255, 255, 255, 0.04);
++    }
++    .preview-plot-text {
++      font-size: clamp(0.78rem, 0.95vw, 0.85rem);
++      line-height: 1.5;
++      color: var(--text-silver);
++      display: -webkit-box;
++      -webkit-line-clamp: 4;
++      -webkit-box-orient: vertical;
++      overflow: hidden;
++      text-overflow: ellipsis;
++      margin: 0;
++    }
++
++    /* Live Channel Card */
++    .preview-channel-card {
++      display: flex;
++      flex-direction: column;
++      gap: 10px;
++      width: 100%;
++    }
++    .preview-channel-header {
++      display: flex;
++      flex-direction: row;
++      align-items: center;
++      gap: 12px;
++      width: 100%;
++    }
++    .preview-channel-logo-wrapper {
++      position: relative;
++      flex: 0 0 54px;
++      width: 54px;
++      height: 54px;
++      border-radius: 12px;
++      background: rgba(10, 15, 22, 0.9);
++      border: 1px solid rgba(255, 255, 255, 0.1);
++      display: flex;
++      align-items: center;
++      justify-content: center;
++      overflow: hidden;
++      padding: 4px;
++      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
++    }
++    .preview-channel-logo-img {
++      max-width: 100%;
++      max-height: 100%;
++      object-fit: contain;
++    }
++    .preview-channel-logo-fallback {
++      font-size: 0.85rem;
++      font-weight: 700;
++      color: var(--accent-gold);
++      text-align: center;
++    }
++    .preview-channel-meta {
++      display: flex;
++      flex-direction: column;
++      gap: 4px;
++      flex: 1 1 auto;
++      min-width: 0;
++    }
++    .preview-channel-name {
++      font-size: clamp(0.95rem, 1.25vw, 1.15rem);
++      font-weight: 700;
++      color: var(--text-white);
++      line-height: 1.3;
++      white-space: nowrap;
++      overflow: hidden;
++      text-overflow: ellipsis;
++    }
++
++    /* Channel EPG Section */
++    .preview-epg-box {
++      display: flex;
++      flex-direction: column;
++      gap: 7px;
++      background: rgba(10, 15, 22, 0.55);
++      border: 1px solid rgba(255, 255, 255, 0.05);
++      border-radius: 10px;
++      padding: 9px 11px;
++      width: 100%;
++    }
++    .preview-epg-current {
++      display: flex;
++      flex-direction: column;
++      gap: 3px;
++    }
++    .preview-epg-label-row {
++      display: flex;
++      align-items: center;
++      justify-content: space-between;
++      gap: 6px;
++    }
++    .preview-epg-tag-group {
++      display: flex;
++      align-items: center;
++      gap: 6px;
++    }
++    .preview-live-dot {
++      width: 8px;
++      height: 8px;
++      border-radius: 50%;
++      background: var(--danger-red);
++      box-shadow: 0 0 8px rgba(224, 83, 60, 0.8);
++      animation: pulseLiveDot 1.5s infinite;
++    }
++    @keyframes pulseLiveDot {
++      0%, 100% { opacity: 1; transform: scale(1); }
++      50% { opacity: 0.4; transform: scale(0.85); }
++    }
++    .preview-epg-label {
++      font-size: 0.72rem;
++      font-weight: 700;
++      color: var(--text-silver);
++    }
++    .preview-epg-time {
++      font-size: 0.72rem;
++      font-weight: 600;
++      color: var(--accent-gold);
++      direction: ltr;
++    }
++    .preview-epg-title {
++      font-size: 0.88rem;
++      font-weight: 600;
++      color: var(--text-white);
++      line-height: 1.35;
++      display: -webkit-box;
++      -webkit-line-clamp: 2;
++      -webkit-box-orient: vertical;
++      overflow: hidden;
++      text-overflow: ellipsis;
++    }
++    .preview-epg-next {
++      display: flex;
++      flex-direction: column;
++      gap: 2px;
++      padding-top: 6px;
++      border-top: 1px dashed rgba(255, 255, 255, 0.08);
++    }
++    .preview-epg-next-label {
++      font-size: 0.7rem;
++      font-weight: 600;
++      color: var(--text-muted);
++    }
++    .preview-epg-next-title {
++      font-size: 0.8rem;
++      color: var(--text-silver);
++      white-space: nowrap;
++      overflow: hidden;
++      text-overflow: ellipsis;
++    }
++    .preview-epg-live-note {
++      font-size: 0.78rem;
++      color: var(--text-muted);
++      display: flex;
++      align-items: center;
++      gap: 6px;
++      padding: 4px 0;
++    }
++
+     /* Fullscreen is portaled directly under body so ancestor overflow,
+        transforms and stacking contexts cannot trap the video inside the player column.
+        Exclude the external-audio dialog from the hidden app tree instead of hiding
+diff --git a/app/src/main/java/com/example/MainActivity.kt b/app/src/main/java/com/example/MainActivity.kt
+index c76f310..ad4a485 100644
+--- a/app/src/main/java/com/example/MainActivity.kt
++++ b/app/src/main/java/com/example/MainActivity.kt
+@@ -204,6 +204,16 @@ class MainActivity : ComponentActivity() {
+                 }
+             }
+ 
++            xtreamBridge.setDetailsResultHandler { requestId, result ->
++                val quotedId = JSONObject.quote(requestId)
++                wv.post {
++                    wv.evaluateJavascript(
++                        "window.onXtreamDetailsLoaded && window.onXtreamDetailsLoaded($quotedId, $result)",
++                        null
++                    )
++                }
++            }
++
+             webView = wv
+             val root = FrameLayout(this).apply {
+                 background = SonixBackgroundDrawable()
+diff --git a/app/src/main/java/com/example/XtreamBridge.kt b/app/src/main/java/com/example/XtreamBridge.kt
+index 9a422e3..8e44794 100644
+--- a/app/src/main/java/com/example/XtreamBridge.kt
++++ b/app/src/main/java/com/example/XtreamBridge.kt
+@@ -47,8 +47,10 @@ class XtreamBridge(context: Context) {
+     private val catalogTokens = ConcurrentHashMap<String, AtomicBoolean>()
+     private val catalogConnections = ConcurrentHashMap<String, HttpURLConnection>()
+     @Volatile private var asyncResultHandler: ((String, String) -> Unit)? = null
++    @Volatile private var detailsResultHandler: ((String, String) -> Unit)? = null
+ 
+     fun setAsyncResultHandler(handler: ((String, String) -> Unit)?) { asyncResultHandler = handler }
++    fun setDetailsResultHandler(handler: ((String, String) -> Unit)?) { detailsResultHandler = handler }
+ 
+     fun shutdown() {
+         catalogTokens.values.forEach { it.set(true) }
+@@ -261,6 +263,44 @@ class XtreamBridge(context: Context) {
+         return requestSaved("get_vod_info", "vod_id" to vodId)
+     }
+ 
++    @JavascriptInterface
++    fun requestDetailsAsync(action: String, paramKey: String, paramVal: String, requestId: String) {
++        val id = requestId.trim()
++        if (id.isBlank() || id.length > 120) return
++        val token = AtomicBoolean(false)
++        if (catalogTokens.putIfAbsent(id, token) != null) return
++        val task = FutureTask {
++            try {
++                val credentials = vault.read() ?: throw IllegalStateException("سجّل الدخول أولاً")
++                ensureCatalogRequestActive(token)
++                val body = request(
++                    credentials.server, credentials.username, credentials.password,
++                    "player_api.php", action = action, extra = mapOf(paramKey to paramVal),
++                    requestId = id, cancellation = token
++                )
++                ensureCatalogRequestActive(token)
++                val response = "{\"success\":true,\"action\":${JSONObject.quote(action)},\"id\":${JSONObject.quote(paramVal)},\"data\":$body}"
++                if (!token.get()) detailsResultHandler?.invoke(id, response)
++            } catch (error: Throwable) {
++                if (!token.get()) detailsResultHandler?.invoke(id, errorResult(error))
++            } finally {
++                catalogJobs.remove(id)
++                catalogTokens.remove(id)
++                catalogConnections.remove(id)
++            }
++        }
++        catalogJobs[id] = task
++        catalogExecutor.execute(task)
++    }
++
++    @JavascriptInterface
++    fun cancelDetailsLoad(requestId: String) {
++        val id = requestId.trim()
++        catalogTokens.remove(id)?.set(true)
++        catalogConnections.remove(id)?.disconnect()
++        catalogJobs.remove(id)?.cancel(true)
++    }
++
+     @JavascriptInterface
+     fun streamUrl(type: String, streamId: String, extension: String): String {
+         return try {
+-- 
+2.39.5
+
