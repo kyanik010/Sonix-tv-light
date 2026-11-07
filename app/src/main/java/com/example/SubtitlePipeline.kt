@@ -110,7 +110,7 @@ internal object SubtitlePipeline {
             }
             "ttml", "xml" -> {
                 val paragraph = Regex("(?is)<p\\b([^>]*)>(.*?)</p>")
-                val attribute = Regex("""([\\w:-]+)\\s*=\\s*["']([^"']+)["']""")
+                val attribute = Regex("""([\w:-]+)\s*=\s*["']([^"']+)["']""")
                 paragraph.findAll(source).forEach { match ->
                     val attrs = attribute.findAll(match.groupValues[1])
                         .associate { it.groupValues[1].lowercase(Locale.ROOT) to it.groupValues[2] }
@@ -123,7 +123,7 @@ internal object SubtitlePipeline {
                 // SRT and WebVTT: split into cue blocks, allowing cue identifiers,
                 // VTT settings, CRLF, and both HH:MM:SS.mmm and MM:SS.mmm timestamps.
                 val timestamp = Regex(
-                    """((?:\\d{1,2}:)?\\d{2}:\\d{2}[,.]\\d{1,3})\\s*-->\\s*((?:\\d{1,2}:)?\\d{2}:\\d{2}[,.]\\d{1,3})"""
+                    """((?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*((?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{1,3})"""
                 )
                 source.split(Regex("\\n\\s*\\n")).forEach { block ->
                     val lines = block.lines()
@@ -188,9 +188,9 @@ internal object SubtitlePipeline {
 
     private fun fileNameFromDisposition(value: String?): String? {
         if (value.isNullOrBlank()) return null
-        val extended = Regex("""filename\\*\\s*=\\s*UTF-8''([^;]+)""", RegexOption.IGNORE_CASE)
+        val extended = Regex("""filename\*\s*=\s*UTF-8''([^;]+)""", RegexOption.IGNORE_CASE)
             .find(value)?.groupValues?.getOrNull(1)
-        val plain = Regex("""filename\\s*=\\s*["']?([^;"']+)""", RegexOption.IGNORE_CASE)
+        val plain = Regex("""filename\s*=\s*["']?([^;"']+)""", RegexOption.IGNORE_CASE)
             .find(value)?.groupValues?.getOrNull(1)
         val raw = extended ?: plain ?: return null
         return try { URLDecoder.decode(raw.trim(), "UTF-8") } catch (_: Exception) { raw.trim() }
