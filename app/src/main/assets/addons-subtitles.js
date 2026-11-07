@@ -43,10 +43,10 @@
 
   function readStyle() {
     try {
-      return Object.assign({font:'Reem Kufi',size:24,color:'#FFFFFF',background:'off',outline:'shadow',position:'bottom'},
+      return Object.assign({font:'Reem Kufi',size:24,color:'#FFFFFF',background:'off',outline:'shadow',position:'bottom',delay:0},
         JSON.parse(localStorage.getItem(STYLE_KEY) || '{}'));
     } catch (_) {
-      return {font:'Reem Kufi',size:24,color:'#FFFFFF',background:'off',outline:'shadow',position:'bottom'};
+      return {font:'Reem Kufi',size:24,color:'#FFFFFF',background:'off',outline:'shadow',position:'bottom',delay:0};
     }
   }
   function saveStyle() {
@@ -460,6 +460,12 @@
       const result = await nativeApplySubtitle(entry.url, entry.label);
       if (!result.success) throw new Error(result.error || 'تعذر تحميل الترجمة');
       card.disabled = false;
+      document.querySelectorAll('#subtitle-results .subtitle-action-status').forEach(b => {
+        if (b !== statusBadge) {
+          b.textContent = 'تحميل';
+          b.className = 'subtitle-action-status';
+        }
+      });
       statusBadge.textContent = '✓ مفعّلة';
       statusBadge.className = 'subtitle-action-status active';
       currentSubtitleLabel = entry.label;
@@ -482,6 +488,9 @@
     try {
       window.NativePlayback.setSubtitleStyle(subtitleStyle.font,String(subtitleStyle.size),color,
         subtitleStyle.background,subtitleStyle.outline,subtitleStyle.position);
+      if (typeof window.NativePlayback.setSubtitleDelay === 'function') {
+        window.NativePlayback.setSubtitleDelay(Number(subtitleStyle.delay) || 0);
+      }
     } catch (error) { console.warn('Unable to apply subtitle style',error); }
   }
 
@@ -529,12 +538,14 @@
     const background = document.getElementById('subtitle-background');
     const outline = document.getElementById('subtitle-outline');
     const position = document.getElementById('subtitle-position');
+    const delay = document.getElementById('subtitle-delay');
     if (font) font.value = subtitleStyle.font;
     if (size) size.value = String(subtitleStyle.size);
     if (color) color.value = subtitleStyle.color;
     if (background) background.value = subtitleStyle.background;
     if (outline) outline.value = subtitleStyle.outline;
     if (position) position.value = subtitleStyle.position;
+    if (delay) delay.value = String(subtitleStyle.delay || 0);
   }
 
   function bind() {
@@ -614,6 +625,13 @@
     document.getElementById('subtitle-background')?.addEventListener('change', e => { subtitleStyle.background=e.target.value; saveStyle(); });
     document.getElementById('subtitle-outline')?.addEventListener('change', e => { subtitleStyle.outline=e.target.value; saveStyle(); });
     document.getElementById('subtitle-position')?.addEventListener('change', e => { subtitleStyle.position=e.target.value; saveStyle(); });
+    document.getElementById('subtitle-delay')?.addEventListener('change', e => {
+      subtitleStyle.delay = Number(e.target.value) || 0;
+      saveStyle();
+      if (window.NativePlayback && window.NativePlayback.setSubtitleDelay) {
+        window.NativePlayback.setSubtitleDelay(subtitleStyle.delay);
+      }
+    });
     applyStyle();
   }
 

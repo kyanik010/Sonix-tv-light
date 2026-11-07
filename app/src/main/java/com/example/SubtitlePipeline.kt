@@ -1,5 +1,6 @@
 package com.example
 
+import androidx.media3.common.MimeTypes
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.net.URLDecoder
@@ -254,5 +255,74 @@ internal object SubtitlePipeline {
             output.write(buffer, 0, count)
         }
         return output.toByteArray()
+    }
+
+    /**
+     * Shifts timestamps in SRT or WebVTT subtitles by offsetMs.
+     * Positive values delay subtitles; negative values advance them.
+     */
+    fun applyDelay(sourceText: String, extension: String, offsetMs: Long): String {
+        if (offsetMs == 0L) return sourceText
+        val ext = extension.lowercase(Locale.ROOT)
+        if (ext != "srt" && ext != "vtt") return sourceText
+        val timestampRegex = Regex("""(?<![\d:])(?:(\d{1,2}):)?(\d{2}):(\d{2})([,.])(\d{1,3})(?!\d)""")
+        return timestampRegex.replace(sourceText) { match ->
+            val hoursStr = match.groupValues[1]
+            val minutesStr = match.groupValues[2]
+            val secondsStr = match.groupValues[3]
+            val sep = match.groupValues[4]
+            val millisStr = match.groupValues[5].padEnd(3, '0').take(3)
+
+            val hours = if (hoursStr.isNotEmpty()) hoursStr.toLongOrNull() ?: 0L else 0L
+            val minutes = minutesStr.toLongOrNull() ?: 0L
+            val seconds = secondsStr.toLongOrNull() ?: 0L
+            val millis = millisStr.toLongOrNull() ?: 0L
+
+            val originalMs = (hours * 3600L + minutes * 60L + seconds) * 1000L + millis
+            val adjustedMs = (originalMs + offsetMs).coerceAtLeast(0L)
+
+            val adjHours = adjustedMs / 3_600_000L
+            val adjMinutes = (adjustedMs / 60_000L) % 60L
+            val adjSeconds = (adjustedMs / 1_000L) % 60L
+            val adjMillis = adjustedMs % 1_000L
+
+            if (hoursStr.isNotEmpty()) {
+                String.format(
+                    Locale.US,
+                    "%02d:%02d:%02d%s%03d",
+                    adjHours, adjMinutes, adjSeconds, sep, adjMillis
+                )
+            } else {
+                String.format(
+                    Locale.US,
+                    "%02d:%02d%s%03d",
+                    adjMinutes + adjHours * 60L, adjSeconds, sep, adjMillis
+                )
+            }
+        }
+    }
+
+    fun getMimeTypeForExtension(extension: String): String = when (extension.lowercase(Locale.ROOT).removePrefix(".")) {
+        "vtt" -> MimeTypes.TEXT_VTT
+        "ass", "ssa" -> MimeTypes.TEXT_SSA
+        "ttml", "xml" -> MimeTypes.APPLICATION_TTML
+        else -> MimeTypes.APPLICATION_SUBRIP
+    }
+
+    fun detectLanguage(label: String, fileName: String = ""): String {
+        val text = "${label.lowercase(Locale.ROOT)} ${fileName.lowercase(Locale.ROOT)}"
+        return when {
+            text.contains("arabic") || text.contains("العربية") || text.contains("عربي") || text.contains(".ar.") || text.endsWith(".ar") -> "ar"
+            text.contains("english") || text.contains("انجليزي") || text.contains(".en.") || text.endsWith(".en") -> "en"
+            text.contains("french") || text.contains("français") || text.contains(".fr.") || text.endsWith(".fr") -> "fr"
+            text.contains("spanish") || text.contains("español") || text.contains(".es.") || text.endsWith(".es") -> "es"
+            text.contains("german") || text.contains("deutsch") || text.contains(".de.") || text.endsWith(".de") -> "de"
+            text.contains("italian") || text.contains("italiano") || text.contains(".it.") || text.endsWith(".it") -> "it"
+            text.contains("portuguese") || text.contains("português") || text.contains(".pt.") || text.endsWith(".pt") -> "pt"
+            text.contains("russian") || text.contains("русский") || text.contains(".ru.") || text.endsWith(".ru") -> "ru"
+            text.contains("turkish") || text.contains("türkçe") || text.contains(".tr.") || text.endsWith(".tr") -> "tr"
+            text.contains("persian") || text.contains("farsi") || text.contains("فارسی") || text.contains(".fa.") || text.endsWith(".fa") -> "fa"
+            else -> "und"
+        }
     }
 }
