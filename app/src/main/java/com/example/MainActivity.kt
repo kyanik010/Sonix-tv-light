@@ -1219,8 +1219,13 @@ class MainActivity : ComponentActivity() {
     private fun setSubtitlesEnabledInternal(enabled: Boolean) {
         activeSubtitleEnabled = enabled
         nativePlayer?.let { player ->
+            // External subtitles are rendered as a synchronized overlay. Keep
+            // ExoPlayer's embedded text renderer disabled while that overlay
+            // owns subtitle presentation, otherwise native cue callbacks can
+            // replace the externally supplied cues on PlayerView.
+            val disableNativeTextTracks = activeSubtitleCues.isNotEmpty() || !enabled
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !enabled)
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, disableNativeTextTracks)
                 .build()
         }
         if (!enabled) {
@@ -1277,8 +1282,12 @@ class MainActivity : ComponentActivity() {
             val parsedCues = parseSubtitleFile(file)
             require(parsedCues.isNotEmpty()) { "ملف الترجمة لا يحتوي على توقيتات أو نصوص قابلة للعرض" }
             nativePlayer?.let { player ->
+                // This subtitle is rendered from the downloaded cues below,
+                // not decoded as an embedded ExoPlayer text track. Disable the
+                // native text renderer so its onCues callbacks cannot compete
+                // with the external subtitle overlay.
                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
                     .clearOverridesOfType(C.TRACK_TYPE_TEXT)
                     .build()
             }
