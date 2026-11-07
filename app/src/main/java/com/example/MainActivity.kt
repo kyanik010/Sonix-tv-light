@@ -26,11 +26,7 @@ import android.graphics.Typeface
 import android.util.TypedValue
 import java.io.File
 import java.io.FileOutputStream
-import java.io.ByteArrayInputStream
-import java.nio.ByteBuffer
-import java.nio.charset.Charset
-import java.nio.charset.CodingErrorAction
-import java.util.zip.GZIPInputStream
+import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
@@ -72,6 +68,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.ViewCompat
 
+internal data class TimedSubtitleCue(val startMs: Long, val endMs: Long, val text: String)
+
 @OptIn(UnstableApi::class)
 class MainActivity : ComponentActivity() {
 
@@ -96,7 +94,6 @@ class MainActivity : ComponentActivity() {
     private var activeSubtitleFile: File? = null
     private var activeSubtitleLabel: String = ""
     private var activeSubtitleEnabled: Boolean = true
-    private data class TimedSubtitleCue(val startMs: Long, val endMs: Long, val text: String)
     private var activeSubtitleCues: List<TimedSubtitleCue> = emptyList()
     private var subtitleCueCursor = 0
     private var lastSubtitlePositionMs = 0L
@@ -753,28 +750,61 @@ class MainActivity : ComponentActivity() {
                 var downloaded: File? = null
                 val payload = try {
                     val uri = Uri.parse(rawUrl.trim())
-                    require((uri.scheme == "https" || uri.scheme == "http") && !uri.host.isNullOrBlank()) { "رابط الترجمة غير صالح" }
+                    require((uri.scheme == "https" || uri.scheme == "http") && !uri.host.isNullOrBlank()) {
+                        "رابط الترجمة غير صالح"
+                    }
                     val connection = URL(uri.toString()).openConnection() as HttpURLConnection
-                    connection.connectTimeout = 15000
-                    connection.readTimeout = 25000
+                    connection.connectTimeout = 20000
+                    connection.readTimeout = 30000
                     connection.instanceFollowRedirects = true
+                    connection.useCaches = false
                     connection.setRequestProperty("User-Agent", "SONIX-TV/1.0")
-                    val rawBytes = try {
-                        require(connection.responseCode in 200..299) { "HTTP ${connection.responseCode}" }
-                        connection.inputStream.use { it.readBytes() }
-                    } finally { connection.disconnect() }
-                    require(rawBytes.isNotEmpty() && rawBytes.size <= 20 * 1024 * 1024) { "ملف الترجمة فارغ أو أكبر من 20MB" }
-                    val ext = normalizeSubtitleExtension(uri.lastPathSegment ?: uri.toString())
-                    val decodedText = decodeSubtitleText(rawBytes)
-                    require(decodedText.isNotBlank()) { "تعذر فك ترميز ملف الترجمة" }
+                    connection.setRequestProperty(
+                        "Accept",
+                        "text/plain,text/vtt,application/x-subrip,application/octet-stream,application/zip,application/gzip,*/*"
+                    )
+                    connection.setRequestProperty("Accept-Encoding", "gzip, deflate")
+                    val decoded = try {
+                        val code = connection.responseCode
+                        require(code in 200..299) { "HTTP $code" }
+                        val contentType = connection.contentType.orEmpty().lowercase()
+                        require(!contentType.contains("text/html") && !contentType.contains("application/json")) {
+                            "مصدر الترجمة أعاد صفحة ويب أو JSON بدلاً من ملف ترجمة"
+                        }
+                        val encoding = connection.contentEncoding
+                        val disposition = connection.getHeaderField("Content-Disposition")
+                        val finalUrl = connection.url.toString()
+                        val finalUri = Uri.parse(finalUrl)
+                        require((finalUri.scheme == "https" || finalUri.scheme == "http") && !finalUri.host.isNullOrBlank()) {
+                            "وجهة تحويل رابط الترجمة غير صالحة"
+                        }
+                        val rawBytes = connection.inputStream.use { input ->
+                            val output = java.io.ByteArrayOutputStream()
+                            val buffer = ByteArray(8192)
+                            var total = 0
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                total += count
+                                require(total <= 20 * 1024 * 1024) { "ملف الترجمة أكبر من 20MB" }
+                                output.write(buffer, 0, count)
+                            }
+                            output.toByteArray()
+                        }
+                        SubtitlePipeline.decodePayload(rawBytes, encoding, finalUrl, disposition)
+                    } finally {
+                        connection.disconnect()
+                    }
                     val folder = File(cacheDir, "subtitles").apply { mkdirs() }
-                    File(folder, "online_${System.currentTimeMillis()}.$ext").also { file ->
-                        file.writeText(decodedText, Charsets.UTF_8)
+                    File(folder, "online_${System.currentTimeMillis()}.${decoded.extension}").also { file ->
+                        file.writeText(decoded.text, Charsets.UTF_8)
                         downloaded = file
                     }
                     JSONObject().put("success", true).toString()
                 } catch (error: Exception) {
-                    JSONObject().put("success", false).put("error", error.message ?: "تعذر تنزيل الترجمة").toString()
+                    android.util.Log.w("SONIXSubtitle", "Online subtitle download failed", error)
+                    JSONObject().put("success", false)
+                        .put("error", error.message ?: "تعذر تنزيل الترجمة").toString()
                 }
                 runOnUiThread {
                     if (requestGeneration != subtitleGeneration.get()) {
@@ -1183,83 +1213,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun decompressGzipIfNeeded(bytes: ByteArray): ByteArray {
-        if (bytes.size >= 2 && bytes[0] == 0x1f.toByte() && bytes[1] == 0x8b.toByte()) {
-            try {
-                return GZIPInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
-            } catch (error: Exception) {
-                android.util.Log.w("SONIXSubtitle", "Failed to decompress GZIP subtitle stream", error)
-            }
-        }
-        return bytes
-    }
-
-    private fun decodeSubtitleText(bytes: ByteArray): String {
-        val decompressed = decompressGzipIfNeeded(bytes)
-        if (decompressed.isEmpty()) return ""
-
-        // Check Byte Order Marks (BOM)
-        if (decompressed.size >= 3 && decompressed[0] == 0xEF.toByte() && decompressed[1] == 0xBB.toByte() && decompressed[2] == 0xBF.toByte()) {
-            return String(decompressed, 3, decompressed.size - 3, Charsets.UTF_8)
-        }
-        if (decompressed.size >= 2 && decompressed[0] == 0xFF.toByte() && decompressed[1] == 0xFE.toByte()) {
-            return String(decompressed, 2, decompressed.size - 2, Charsets.UTF_16LE)
-        }
-        if (decompressed.size >= 2 && decompressed[0] == 0xFE.toByte() && decompressed[1] == 0xFF.toByte()) {
-            return String(decompressed, 2, decompressed.size - 2, Charsets.UTF_16BE)
-        }
-
-        // Try strict UTF-8
-        try {
-            val decoder = Charsets.UTF_8.newDecoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-            val charBuffer = decoder.decode(ByteBuffer.wrap(decompressed))
-            return charBuffer.toString()
-        } catch (_: Exception) {}
-
-        // Try windows-1256 (standard Arabic codepage)
-        try {
-            val cp1256 = Charset.forName("windows-1256")
-            val decoded1256 = String(decompressed, cp1256)
-            if (decoded1256.any { it in '\u0600'..'\u06FF' }) {
-                return decoded1256
-            }
-        } catch (_: Exception) {}
-
-        // Try ISO-8859-6 (Arabic)
-        try {
-            val isoArabic = Charset.forName("ISO-8859-6")
-            val decodedIso = String(decompressed, isoArabic)
-            if (decodedIso.any { it in '\u0600'..'\u06FF' }) {
-                return decodedIso
-            }
-        } catch (_: Exception) {}
-
-        // Try windows-1252 / ISO-8859-1
-        try {
-            val cp1252 = Charset.forName("windows-1252")
-            val decoded1252 = String(decompressed, cp1252)
-            if (decoded1252.isNotEmpty()) {
-                return decoded1252
-            }
-        } catch (_: Exception) {}
-
-        // Fallback: UTF-8 with replacement chars
-        return String(decompressed, Charsets.UTF_8)
-    }
-
-    private fun normalizeSubtitleExtension(rawNameOrUrl: String): String {
-        var clean = rawNameOrUrl.substringBefore('?').substringBefore('#').trim().lowercase()
-        if (clean.endsWith(".gz")) {
-            clean = clean.substringBeforeLast(".gz")
-        }
-        val ext = clean.substringAfterLast('.', "")
-        return when (ext) {
-            "srt", "vtt", "ssa", "ass", "ttml", "xml", "sub", "txt" -> ext
-            else -> "srt"
-        }
-    }
+    private fun normalizeSubtitleExtension(rawNameOrUrl: String): String =
+        SubtitlePipeline.normalizeExtension(rawNameOrUrl)
 
     private fun setSubtitlesEnabledInternal(enabled: Boolean) {
         activeSubtitleEnabled = enabled
@@ -1376,56 +1331,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun parseSubtitleFile(file: File): List<TimedSubtitleCue> {
-        val source = file.readText(Charsets.UTF_8).removePrefix("\uFEFF").replace("\r\n", "\n").replace('\r', '\n')
-        val ext = file.extension.lowercase()
-        val result = mutableListOf<TimedSubtitleCue>()
-        fun add(start: String, end: String, rawText: String) {
-            val startMs = subtitleTimeToMs(start) ?: return
-            val endMs = subtitleTimeToMs(end) ?: return
-            val clean = rawText.replace(Regex("(?i)<br\\s*/?>"), "\n")
-                .replace(Regex("<[^>]+>"), "")
-                .replace("&nbsp;", " ").replace("&amp;", "&")
-                .replace("&lt;", "<").replace("&gt;", ">")
-                .replace("&quot;", "\"").replace("&#39;", "'")
-                .replace("\\N", "\n").replace(Regex("\\{[^}]*}"), "").trim()
-            if (clean.isNotBlank() && endMs > startMs) result += TimedSubtitleCue(startMs, endMs, clean)
-        }
-        if (ext == "ass" || ext == "ssa") {
-            val dialogue = Regex("""Dialogue:[^,]*,([^,]+),([^,]+),[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,(.*)""")
-            source.lineSequence().forEach { line ->
-                val match = dialogue.find(line.trim()) ?: return@forEach
-                add(match.groupValues[1], match.groupValues[2], match.groupValues[3])
-            }
-        } else if (ext == "ttml" || ext == "xml") {
-            val paragraphs = Regex("""(?is)<p\b([^>]*)>(.*?)</p>""")
-            val attribute = Regex("""([\w:-]+)\s*=\s*["']([^"']+)["']""")
-            paragraphs.findAll(source).forEach { match ->
-                val attrs = attribute.findAll(match.groupValues[1]).associate { it.groupValues[1].lowercase() to it.groupValues[2] }
-                val begin = attrs["begin"] ?: return@forEach
-                val end = attrs["end"] ?: return@forEach
-                add(begin, end, match.groupValues[2])
-            }
-        } else {
-            val blocks = Regex("""(?ms)(?:^|\n)\s*(?:[^\n]*\n)?(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})[^\n]*\n(.*?)(?=\n\s*\n|$)""")
-            blocks.findAll(source).forEach { match ->
-                add(match.groupValues[1], match.groupValues[2], match.groupValues[3])
-            }
-        }
-        return result.sortedBy { it.startMs }
+        val source = file.readText(Charsets.UTF_8)
+        return SubtitlePipeline.parse(source, file.extension)
     }
 
-    private fun subtitleTimeToMs(raw: String): Long? {
-        val parts = raw.trim().replace(',', '.').split(':')
-        return try {
-            val seconds = when (parts.size) {
-                3 -> parts[0].toLong() * 3600 + parts[1].toLong() * 60 + parts[2].toDouble()
-                2 -> parts[0].toLong() * 60 + parts[1].toDouble()
-                1 -> parts[0].toDouble()
-                else -> return null
-            }
-            (seconds * 1000.0).toLong().takeIf { it >= 0L }
-        } catch (_: Exception) { null }
-    }
+    private fun subtitleTimeToMs(raw: String): Long? = SubtitlePipeline.timeToMs(raw)
 
     private fun notifyLocalSubtitleResult(success: Boolean, label: String, message: String) {
         val js = "window.SonixSubtitles && window.SonixSubtitles.onLocalSubtitleResult(" +
