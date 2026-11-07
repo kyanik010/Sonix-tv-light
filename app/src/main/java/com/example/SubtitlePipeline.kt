@@ -24,6 +24,7 @@ internal data class DecodedSubtitle(
 internal object SubtitlePipeline {
     private const val MAX_SUBTITLE_BYTES = 20 * 1024 * 1024
     private val supportedExtensions = setOf("srt", "vtt", "ass", "ssa", "ttml", "xml", "txt")
+    private val preferredSubtitleExtensions = setOf("srt", "vtt", "ass", "ssa", "ttml", "xml")
 
     fun decodePayload(
         rawBytes: ByteArray,
@@ -234,8 +235,8 @@ internal object SubtitlePipeline {
                 zip.closeEntry()
                 if (data.isEmpty()) continue
                 val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
-                if (ext in supportedExtensions) return name to data
-                if (fallback == null) fallback = name to data
+                if (ext in preferredSubtitleExtensions) return name to data
+                if (fallback == null && ext in supportedExtensions) fallback = name to data
             }
         }
         return fallback ?: throw IllegalArgumentException("أرشيف ZIP لا يحتوي على ملف ترجمة")
