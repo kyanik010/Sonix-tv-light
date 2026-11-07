@@ -844,7 +844,7 @@ class MainActivity : ComponentActivity() {
         @android.webkit.JavascriptInterface
         fun hasTextTracks(): Boolean {
             return try {
-                activeSubtitleCues.isNotEmpty() || nativePlayer?.currentTracks?.groups?.any { it.type == C.TRACK_TYPE_TEXT } == true
+                activeSubtitleFile != null || nativePlayer?.currentTracks?.groups?.any { it.type == C.TRACK_TYPE_TEXT } == true
             } catch (_: Exception) { false }
         }
 
@@ -855,7 +855,7 @@ class MainActivity : ComponentActivity() {
 
         @android.webkit.JavascriptInterface
         fun hasActiveSubtitle(): Boolean {
-            return activeSubtitleCues.isNotEmpty()
+            return activeSubtitleFile != null
         }
 
         @android.webkit.JavascriptInterface
@@ -1259,7 +1259,9 @@ class MainActivity : ComponentActivity() {
         notify: Boolean = true,
         requestId: String? = null
     ) {
-        if (nativePlayer == null || activeMediaUri == null) {
+        val player = nativePlayer
+        val mediaUri = activeMediaUri
+        if (player == null || mediaUri == null) {
             val error = "شغّل الفيديو أولاً قبل إضافة الترجمة"
             if (requestId != null) {
                 deliverSubtitleResponse(requestId, JSONObject().put("success", false).put("error", error).toString())
@@ -1279,32 +1281,55 @@ class MainActivity : ComponentActivity() {
         pendingSubtitleLabel = label
         pendingSubtitleNotifyLocal = notify
         try {
-            val parsedCues = parseSubtitleFile(file)
-            require(parsedCues.isNotEmpty()) { "ملف الترجمة لا يحتوي على توقيتات أو نصوص قابلة للعرض" }
-            nativePlayer?.let { player ->
-                // This subtitle is rendered from the downloaded cues below,
-                // not decoded as an embedded ExoPlayer text track. Disable the
-                // native text renderer so its onCues callbacks cannot compete
-                // with the external subtitle overlay.
-                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                    .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                    .build()
+            // Match Lumen's Media3 implementation: attach the selected subtitle
+            // as a real MediaItem subtitle configuration, not as manually timed
+            // PlayerView cues. Keep the current stream URI, position and play state.
+            val subtitleUri = Uri.fromFile(file)
+            val extension = file.extension.lowercase()
+            val subtitleMimeType = when (extension) {
+                "vtt" -> MimeTypes.TEXT_VTT
+                "ass", "ssa" -> MimeTypes.TEXT_SSA
+                "ttml", "xml" -> MimeTypes.APPLICATION_TTML
+                else -> MimeTypes.APPLICATION_SUBRIP
             }
+            val currentPosition = player.currentPosition.coerceAtLeast(0L)
+            val shouldPlay = player.playWhenReady
+            val mediaBuilder = MediaItem.Builder()
+                .setUri(mediaUri)
+            if (mediaUri.lastPathSegment.orEmpty().endsWith(".m3u8", ignoreCase = true)) {
+                mediaBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
+            }
+            mediaBuilder.setSubtitleConfigurations(
+                listOf(
+                    MediaItem.SubtitleConfiguration.Builder(subtitleUri)
+                        .setMimeType(subtitleMimeType)
+                        .setLabel(label)
+                        .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                        .build()
+                )
+            )
+
+            player.setMediaItem(mediaBuilder.build(), currentPosition)
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                .build()
+            player.prepare()
+            player.playWhenReady = shouldPlay
+
             activeSubtitleFile = file
             activeSubtitleLabel = label
             activeSubtitleEnabled = true
-            activeSubtitleCues = parsedCues
+            activeSubtitleCues = emptyList()
             subtitleCueCursor = 0
             lastSubtitlePositionMs = 0L
             lastRenderedSubtitleText = null
             subtitleRenderHandler.removeCallbacks(subtitleRenderRunnable)
             nativePlayerView?.subtitleView?.setCues(emptyList())
-            subtitleRenderHandler.post(subtitleRenderRunnable)
             notifySubtitleStateChanged(true, label, true)
             finishSubtitleActivation(true, "")
         } catch (error: Exception) {
-            finishSubtitleActivation(false, error.message ?: "تعذر قراءة ملف الترجمة")
+            finishSubtitleActivation(false, error.message ?: "تعذر تفعيل الترجمة")
         }
     }
 
