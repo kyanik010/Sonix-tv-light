@@ -101,11 +101,20 @@ internal object SubtitlePipeline {
 
         when (extension.lowercase(Locale.ROOT)) {
             "ass", "ssa" -> {
+                var columns = listOf("layer", "start", "end", "style", "name", "marginl", "marginr", "marginv", "effect", "text")
                 source.lineSequence().forEach { line ->
                     val trimmed = line.trim()
+                    if (trimmed.startsWith("Format:", ignoreCase = true)) {
+                        columns = trimmed.substringAfter(':').split(',').map { it.trim().lowercase(Locale.ROOT) }
+                        return@forEach
+                    }
                     if (!trimmed.startsWith("Dialogue:", ignoreCase = true)) return@forEach
-                    val fields = trimmed.substringAfter(':').split(',', limit = 10)
-                    if (fields.size == 10) add(fields[1], fields[2], fields[9])
+                    val startIndex = columns.indexOf("start")
+                    val endIndex = columns.indexOf("end")
+                    val textIndex = columns.indexOf("text")
+                    if (startIndex < 0 || endIndex < 0 || textIndex < 0) return@forEach
+                    val fields = trimmed.substringAfter(':').split(',', limit = columns.size)
+                    if (fields.size >= columns.size) add(fields[startIndex], fields[endIndex], fields[textIndex])
                 }
             }
             "ttml", "xml" -> {
@@ -138,15 +147,26 @@ internal object SubtitlePipeline {
     }
 
     fun timeToMs(raw: String): Long? {
-        val parts = raw.trim().replace(',', '.').split(':')
+        val value = raw.trim().lowercase(Locale.ROOT).replace(',', '.')
         return try {
-            val seconds = when (parts.size) {
-                3 -> parts[0].toLong() * 3600.0 + parts[1].toLong() * 60.0 + parts[2].toDouble()
-                2 -> parts[0].toLong() * 60.0 + parts[1].toDouble()
-                1 -> parts[0].toDouble()
-                else -> return null
+            val scalar = when {
+                value.endsWith("ms") -> value.dropLast(2).toDouble()
+                value.endsWith("s") -> value.dropLast(1).toDouble() * 1000.0
+                value.endsWith("m") -> value.dropLast(1).toDouble() * 60_000.0
+                value.endsWith("h") -> value.dropLast(1).toDouble() * 3_600_000.0
+                else -> null
             }
-            (seconds * 1000.0).toLong().takeIf { it >= 0L }
+            val milliseconds = if (scalar != null) scalar else {
+                val parts = value.split(':')
+                val seconds = when (parts.size) {
+                    3 -> parts[0].toLong() * 3600.0 + parts[1].toLong() * 60.0 + parts[2].toDouble()
+                    2 -> parts[0].toLong() * 60.0 + parts[1].toDouble()
+                    1 -> parts[0].toDouble() * 1000.0
+                    else -> return null
+                }
+                seconds * 1000.0
+            }
+            milliseconds.toLong().takeIf { it >= 0L }
         } catch (_: Exception) { null }
     }
 
