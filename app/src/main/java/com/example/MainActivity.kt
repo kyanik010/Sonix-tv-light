@@ -392,8 +392,12 @@ class MainActivity : ComponentActivity() {
             val params = calculatePlayerLayoutParams(left, top, width, height, pixelRatio, container, webView)
                 ?: throw IllegalStateException("مساحة معاينة الفيديو غير صالحة")
 
+            if (activeMediaUri != mediaUri) {
+                subtitleGeneration.incrementAndGet()
+                finishSubtitleActivation(false, "تغير المحتوى قبل تفعيل الترجمة")
+                clearActiveSubtitleOverlay()
+            }
             activeMediaUri = mediaUri
-            activeSubtitleFile = null
 
             val player = nativePlayer ?: run {
                 val httpDataSourceFactory = DefaultHttpDataSource.Factory()
@@ -499,8 +503,7 @@ class MainActivity : ComponentActivity() {
         private fun attachNativePlayerListeners(player: ExoPlayer) {
             player.addListener(object : Player.Listener {
                 override fun onTracksChanged(tracks: Tracks) {
-                    // External subtitle files are rendered as timed overlays. Never
-                    // mutate the active MediaItem or restart the playing stream here.
+                    completeSubtitleActivationIfTrackAvailable(player, tracks)
                 }
 
                 override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
@@ -521,6 +524,7 @@ class MainActivity : ComponentActivity() {
                                 "window.onNativePlaybackBuffering && window.onNativePlaybackBuffering()", null)
                         }
                         Player.STATE_READY -> {
+                            completeSubtitleActivationIfTrackAvailable(player, player.currentTracks)
                             playbackWatchdogRunnable?.let(playbackRecoveryHandler::removeCallbacks)
                             playbackWatchdogRunnable = null
                             val now = SystemClock.elapsedRealtime()
@@ -1326,11 +1330,46 @@ class MainActivity : ComponentActivity() {
             lastRenderedSubtitleText = null
             subtitleRenderHandler.removeCallbacks(subtitleRenderRunnable)
             nativePlayerView?.subtitleView?.setCues(emptyList())
-            notifySubtitleStateChanged(true, label, true)
-            finishSubtitleActivation(true, "")
+            subtitleActivationTimeout?.let(subtitleActivationHandler::removeCallbacks)
+            val activationTimeout = Runnable {
+                if (pendingSubtitleLabel == label) {
+                    activeSubtitleFile = null
+                    activeSubtitleLabel = ""
+                    activeSubtitleEnabled = false
+                    notifySubtitleStateChanged(false, "", false)
+                    finishSubtitleActivation(false, "لم يتعرف المشغّل على صيغة ملف الترجمة")
+                }
+            }
+            subtitleActivationTimeout = activationTimeout
+            subtitleActivationHandler.postDelayed(activationTimeout, 15000L)
+            completeSubtitleActivationIfTrackAvailable(player, player.currentTracks)
         } catch (error: Exception) {
             finishSubtitleActivation(false, error.message ?: "تعذر تفعيل الترجمة")
         }
+    }
+
+    private fun completeSubtitleActivationIfTrackAvailable(player: ExoPlayer, tracks: Tracks) {
+        if (player !== nativePlayer || pendingSubtitleLabel.isBlank()) return
+        val textGroup = tracks.groups.firstOrNull { group ->
+            group.type == C.TRACK_TYPE_TEXT &&
+                (0 until group.length).any { index -> group.isTrackSupported(index) }
+        } ?: return
+        val trackIndex = (0 until textGroup.length).firstOrNull { textGroup.isTrackSupported(it) }
+            ?: return
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+            .addOverride(TrackSelectionOverride(textGroup.mediaTrackGroup, trackIndex))
+            .build()
+        activeSubtitleEnabled = true
+        activeSubtitleCues = emptyList()
+        subtitleCueCursor = 0
+        lastSubtitlePositionMs = 0L
+        lastRenderedSubtitleText = null
+        subtitleRenderHandler.removeCallbacks(subtitleRenderRunnable)
+        nativePlayerView?.subtitleView?.setCues(emptyList())
+        notifySubtitleStateChanged(true, activeSubtitleLabel, true)
+        finishSubtitleActivation(true, "")
     }
 
     private fun finishSubtitleActivation(success: Boolean, message: String) {
