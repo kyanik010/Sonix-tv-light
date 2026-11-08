@@ -491,6 +491,12 @@
     } catch (error) { console.warn('Unable to apply subtitle style',error); }
   }
 
+  function applyDelay() {
+    if (!window.NativePlayback || !window.NativePlayback.setSubtitleDelay) return;
+    try { window.NativePlayback.setSubtitleDelay(Number(subtitleStyle.delay) || 0); }
+    catch (error) { console.warn('Unable to apply subtitle delay',error); }
+  }
+
   function syncSubtitleLanguageButtons() {
     document.querySelectorAll('[data-subtitle-language]').forEach(button => {
       const active = button.dataset.subtitleLanguage === subtitleLanguage;
@@ -630,12 +636,14 @@
       }
     });
     applyStyle();
+    applyDelay();
   }
 
   window.SonixSubtitles = {
     openSearch: openSubtitleSearch,
     openMarketplace,
     applyStyle,
+    applyDelay,
     refresh: loadMarket,
     onStateChanged: function (enabled, label, hasTrack) {
       if (label) currentSubtitleLabel = label;
