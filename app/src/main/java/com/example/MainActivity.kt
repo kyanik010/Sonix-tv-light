@@ -44,12 +44,11 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.common.TrackSelectionOverride
-import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.Format
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -87,6 +86,8 @@ class MainActivity : ComponentActivity() {
     private val playbackRecoveryHandler = Handler(Looper.getMainLooper())
     private var playbackRequestStartedAtMs = 0L
     private var bufferingStartedAtMs = 0L
+    private var bufferingUiRunnable: Runnable? = null
+    private var bufferingUiShown = false
     private var hasPlaybackReachedReady = false
     private var firstFrameLogged = false
     private var liveRecoveryAttempts = 0
@@ -106,6 +107,7 @@ class MainActivity : ComponentActivity() {
     private var lastSubtitleBackground = "off"
     private var lastSubtitleOutline = "shadow"
     private var lastSubtitlePosition = "bottom"
+    private var activeSubtitleBaseCues: List<TimedSubtitleCue> = emptyList()
     private var activeSubtitleCues: List<TimedSubtitleCue> = emptyList()
     private var subtitleCueCursor = 0
     private var lastSubtitlePositionMs = 0L
@@ -182,6 +184,7 @@ class MainActivity : ComponentActivity() {
     @Volatile private var nativePlayerActive = false
     @Volatile private var nativePlayerPlaying = false
     private var secondaryAudioPlayer: ExoPlayer? = null
+    private var playbackBandwidthMeter: DefaultBandwidthMeter? = null
     private val externalAudioHandler = Handler(Looper.getMainLooper())
     private var externalAudioRetryRunnable: Runnable? = null
     private var externalAudioRetryAttempt = 0
@@ -343,6 +346,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun getPlaybackBandwidthMeter(): DefaultBandwidthMeter {
+        return playbackBandwidthMeter ?: DefaultBandwidthMeter.Builder(this)
+            .setInitialBitrateEstimate(8_000_000L)
+            .build()
+            .also { playbackBandwidthMeter = it }
+    }
+
     private inner class NativePlaybackBridge {
         @android.webkit.JavascriptInterface
         fun playStream(type: String, streamId: String, extension: String, left: Float, top: Float, width: Float, height: Float, pixelRatio: Float, cornerRadiusCssPx: Float) {
@@ -420,18 +430,26 @@ class MainActivity : ComponentActivity() {
                 val dataSourceFactory = DefaultDataSource.Factory(this@MainActivity, httpDataSourceFactory)
                 val mediaSourceFactory = DefaultMediaSourceFactory(this@MainActivity)
                     .setDataSourceFactory(dataSourceFactory)
-                // Match Night's proven live-IPTV buffering profile to better absorb
-                // short network jitter, including when external audio is also active.
+                val isLivePlayback = nativeVideoStreamType == "live"
+                val minBufferMs = if (isLivePlayback) 15_000 else 30_000
+                val maxBufferMs = if (isLivePlayback) 50_000 else 60_000
+                val startBufferMs = 2_500
+                val rebufferMs = 5_000
                 val videoLoadControl = DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(
-                        3000,   // keep a modest safety buffer for IPTV streams
-                        20000,  // cap buffered media to limit memory use
-                        1000,   // start as soon as one second is buffered
-                        2000    // recover faster after a brief network interruption
-                    )
+                    .setBufferDurationsMs(minBufferMs, maxBufferMs, startBufferMs, rebufferMs)
+                    .setPrioritizeTimeOverSizeThresholds(true)
                     .build()
+                val bandwidthMeter = getPlaybackBandwidthMeter()
+                android.util.Log.i(
+                    "SONIXPlayback",
+                    "LOAD_CONTROL profile=" + (if (isLivePlayback) "LIVE" else "VOD") +
+                        " min=" + minBufferMs + "ms max=" + maxBufferMs +
+                        " start=" + startBufferMs + "ms rebuffer=" + rebufferMs +
+                        "ms initialBitrate=" + bandwidthMeter.bitrateEstimate + "bps"
+                )
                 ExoPlayer.Builder(this@MainActivity)
                     .setLoadControl(videoLoadControl)
+                    .setBandwidthMeter(bandwidthMeter)
                     .setMediaSourceFactory(mediaSourceFactory)
                     .build()
                     .also { created ->
@@ -478,9 +496,8 @@ class MainActivity : ComponentActivity() {
             // A reused player must not carry a previous item's forced track override.
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
-                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                 .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
+                .setForceHighestSupportedBitrate(false)
                 .build()
 
             // Use an explicit physical LEFT gravity: START would resolve to RIGHT in RTL
@@ -501,6 +518,7 @@ class MainActivity : ComponentActivity() {
             val mimeType = when (extension) {
                 "m3u8" -> MimeTypes.APPLICATION_M3U8
                 "mpd" -> MimeTypes.APPLICATION_MPD
+                "ts" -> MimeTypes.VIDEO_MP2T
                 else -> null
             }
             val mediaItem = MediaItem.Builder()
@@ -517,10 +535,6 @@ class MainActivity : ComponentActivity() {
 
         private fun attachNativePlayerListeners(player: ExoPlayer) {
             player.addListener(object : Player.Listener {
-                override fun onTracksChanged(tracks: Tracks) {
-                    completeSubtitleActivationIfTrackAvailable(player, tracks)
-                }
-
                 override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
                     if (cueGroup.cues.isNotEmpty()) {
                         android.util.Log.d(
@@ -536,21 +550,47 @@ class MainActivity : ComponentActivity() {
                         Player.STATE_BUFFERING -> {
                             if (bufferingStartedAtMs == 0L) {
                                 bufferingStartedAtMs = SystemClock.elapsedRealtime()
-                                android.util.Log.i("SONIXPlayback", "STATE_BUFFERING streamType=" + (nativeVideoStreamType ?: "url"))
+                                android.util.Log.i(
+                                    "SONIXPlayback",
+                                    "BUFFERING_START streamType=" + (nativeVideoStreamType ?: "url")
+                                )
+                            }
+                            if (!bufferingUiShown && bufferingUiRunnable == null) {
+                                val delayedNotice = Runnable {
+                                    bufferingUiRunnable = null
+                                    if (player === nativePlayer && player.playbackState == Player.STATE_BUFFERING &&
+                                        bufferingStartedAtMs > 0L && !bufferingUiShown) {
+                                        bufferingUiShown = true
+                                        webView?.evaluateJavascript(
+                                            "window.onNativePlaybackBuffering && window.onNativePlaybackBuffering()", null)
+                                    }
+                                }
+                                bufferingUiRunnable = delayedNotice
+                                playbackRecoveryHandler.postDelayed(delayedNotice, 1_500L)
                             }
                             startPlaybackWatchdog(player)
-                            webView?.evaluateJavascript(
-                                "window.onNativePlaybackBuffering && window.onNativePlaybackBuffering()", null)
                         }
                         Player.STATE_READY -> {
-                            completeSubtitleActivationIfTrackAvailable(player, player.currentTracks)
+                            bufferingUiRunnable?.let(playbackRecoveryHandler::removeCallbacks)
+                            bufferingUiRunnable = null
                             playbackWatchdogRunnable?.let(playbackRecoveryHandler::removeCallbacks)
                             playbackWatchdogRunnable = null
                             val now = SystemClock.elapsedRealtime()
                             if (bufferingStartedAtMs > 0L) {
-                                android.util.Log.i("SONIXPlayback", "STATE_READY after " + (now - bufferingStartedAtMs) + "ms buffering; requestElapsed=" + (now - playbackRequestStartedAtMs) + "ms")
+                                val bufferingDurationMs = now - bufferingStartedAtMs
+                                android.util.Log.i(
+                                    "SONIXPlayback",
+                                    "BUFFERING_END duration=" + bufferingDurationMs +
+                                        "ms streamType=" + (nativeVideoStreamType ?: "url")
+                                )
+                                android.util.Log.i(
+                                    "SONIXPlayback",
+                                    "STATE_READY after " + bufferingDurationMs +
+                                        "ms buffering; requestElapsed=" + (now - playbackRequestStartedAtMs) + "ms"
+                                )
                             }
                             bufferingStartedAtMs = 0L
+                            bufferingUiShown = false
                             hasPlaybackReachedReady = true
                             liveRecoveryAttempts = 0
                             liveRecoveryRunnable?.let(playbackRecoveryHandler::removeCallbacks)
@@ -730,6 +770,7 @@ class MainActivity : ComponentActivity() {
                 player.trackSelectionParameters = player.trackSelectionParameters
                     .buildUpon()
                     .setMaxVideoSize(width, height)
+                    .setForceHighestSupportedBitrate(height >= 1080)
                     .build()
             }
         }
@@ -928,12 +969,6 @@ class MainActivity : ComponentActivity() {
                 subtitleGeneration.incrementAndGet()
                 finishSubtitleActivation(false, "تم إيقاف الترجمة")
                 clearActiveSubtitleOverlay()
-                nativePlayer?.let { player ->
-                    player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                        .build()
-                }
             }
         }
 
@@ -1093,6 +1128,7 @@ class MainActivity : ComponentActivity() {
         val mediaSourceFactory = DefaultMediaSourceFactory(httpDataSourceFactory)
         val audioPlayer = ExoPlayer.Builder(this)
             .setLoadControl(loadControl)
+            .setBandwidthMeter(getPlaybackBandwidthMeter())
             .setMediaSourceFactory(mediaSourceFactory)
             .build().apply {
                 trackSelectionParameters = trackSelectionParameters.buildUpon()
@@ -1133,6 +1169,7 @@ class MainActivity : ComponentActivity() {
             val mimeType = when (extension) {
                 "m3u8" -> MimeTypes.APPLICATION_M3U8
                 "mpd" -> MimeTypes.APPLICATION_MPD
+                "ts" -> MimeTypes.VIDEO_MP2T
                 else -> null
             }
             val mediaItem = MediaItem.Builder()
@@ -1297,14 +1334,47 @@ class MainActivity : ComponentActivity() {
         return target
     }
 
+    private fun applySubtitleDelayToCues(
+        cues: List<TimedSubtitleCue>,
+        offsetMs: Long
+    ): List<TimedSubtitleCue> {
+        if (offsetMs == 0L) return cues
+        return cues.mapNotNull { cue ->
+            val startMs = (cue.startMs + offsetMs).coerceAtLeast(0L)
+            val endMs = (cue.endMs + offsetMs).coerceAtLeast(0L)
+            if (endMs > startMs) TimedSubtitleCue(startMs, endMs, cue.text) else null
+        }.sortedBy { it.startMs }
+    }
+
     private fun refreshSubtitleSync(newOffsetMs: Long) {
+        if (newOffsetMs == subtitleDelayMs) {
+            android.util.Log.d("SONIXSubtitle", "Subtitle delay unchanged: offsetMs=$newOffsetMs reload=false")
+            return
+        }
+        val previousOffsetMs = subtitleDelayMs
         subtitleDelayMs = newOffsetMs
-        val source = activeSubtitleSourceFile ?: activeSubtitleFile ?: return
-        val player = nativePlayer ?: return
-        if (!source.exists()) return
-        android.util.Log.i("SONIXSubtitle", "refreshSubtitleSync: offsetMs=$newOffsetMs source=${source.absolutePath}")
-        val prepared = prepareExternalSubtitleWithSync(source, subtitleDelayMs)
-        attachSubtitleFile(prepared, activeSubtitleLabel, notify = false, requestId = null, sourceFile = source)
+        if (activeSubtitleBaseCues.isEmpty()) {
+            android.util.Log.i(
+                "SONIXSubtitle",
+                "Subtitle delay stored for next attachment: old=$previousOffsetMs new=$newOffsetMs reload=false"
+            )
+            return
+        }
+
+        activeSubtitleCues = applySubtitleDelayToCues(activeSubtitleBaseCues, newOffsetMs)
+        subtitleCueCursor = 0
+        lastSubtitlePositionMs = 0L
+        lastRenderedSubtitleText = null
+        subtitleRenderHandler.removeCallbacks(subtitleRenderRunnable)
+        if (activeSubtitleEnabled) {
+            subtitleRenderHandler.post(subtitleRenderRunnable)
+        } else {
+            nativePlayerView?.subtitleView?.setCues(emptyList())
+        }
+        android.util.Log.i(
+            "SONIXSubtitle",
+            "Subtitle delay changed old=$previousOffsetMs new=$newOffsetMs reload=false reason=in-memory-cue-shift"
+        )
     }
 
     private fun detectLanguageFromLabelOrName(label: String, fileName: String): String {
@@ -1326,12 +1396,11 @@ class MainActivity : ComponentActivity() {
 
     private fun setSubtitlesEnabledInternal(enabled: Boolean) {
         activeSubtitleEnabled = enabled
-        nativePlayer?.let { player ->
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !enabled)
-                .build()
-        }
-        if (!enabled) {
+        subtitleRenderHandler.removeCallbacks(subtitleRenderRunnable)
+        if (enabled && activeSubtitleCues.isNotEmpty()) {
+            lastRenderedSubtitleText = null
+            subtitleRenderHandler.post(subtitleRenderRunnable)
+        } else {
             nativePlayerView?.subtitleView?.setCues(emptyList())
             lastRenderedSubtitleText = null
         }
@@ -1370,7 +1439,7 @@ class MainActivity : ComponentActivity() {
             } else if (notify) notifyLocalSubtitleResult(false, label, error)
             return
         }
-        if (!file.exists() || file.length() <= 0L) {
+        if (!file.exists() || file.length() <= 0L || !sourceFile.exists() || sourceFile.length() <= 0L) {
             val error = "ملف الترجمة غير موجود أو فارغ"
             if (requestId != null) {
                 deliverSubtitleResponse(requestId, JSONObject().put("success", false).put("error", error).toString())
@@ -1382,137 +1451,72 @@ class MainActivity : ComponentActivity() {
         pendingSubtitleRequestId = requestId
         pendingSubtitleLabel = label
         pendingSubtitleNotifyLocal = notify
-        activeSubtitleSourceFile = sourceFile
-
-        try {
-            val workingFile = if (subtitleDelayMs != 0L && sourceFile == file) {
-                prepareExternalSubtitleWithSync(sourceFile, subtitleDelayMs)
-            } else {
-                file
-            }
-            val subtitleUri = Uri.fromFile(workingFile)
-            val extension = workingFile.extension.lowercase(Locale.ROOT)
-            val subtitleMimeType = when (extension) {
-                "vtt" -> MimeTypes.TEXT_VTT
-                "ass", "ssa" -> MimeTypes.TEXT_SSA
-                "ttml", "xml" -> MimeTypes.APPLICATION_TTML
-                else -> MimeTypes.APPLICATION_SUBRIP
-            }
-            val detectedLang = detectLanguageFromLabelOrName(label, workingFile.name)
-            android.util.Log.i(
-                "SONIXSubtitle",
-                "Attaching subtitle: uri=$subtitleUri mime=$subtitleMimeType label='$label' lang=$detectedLang delayMs=$subtitleDelayMs size=${workingFile.length()}"
-            )
-
-            val currentPosition = player.currentPosition.coerceAtLeast(0L)
-            val shouldPlay = player.playWhenReady
-            val mediaBuilder = MediaItem.Builder().setUri(mediaUri)
-            val streamExt = mediaUri.lastPathSegment?.substringAfterLast('.', "")?.lowercase(Locale.ROOT).orEmpty()
-            when (streamExt) {
-                "m3u8" -> mediaBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-                "mpd" -> mediaBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
-            }
-            mediaBuilder.setSubtitleConfigurations(
-                listOf(
-                    MediaItem.SubtitleConfiguration.Builder(subtitleUri)
-                        .setMimeType(subtitleMimeType)
-                        .setLabel(label)
-                        .setLanguage(detectedLang)
-                        .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                        .build()
-                )
-            )
-
-            player.setMediaItem(mediaBuilder.build(), currentPosition)
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                .build()
-            player.prepare()
-            player.playWhenReady = shouldPlay
-
-            activeSubtitleFile = workingFile
-            activeSubtitleLabel = label
-            activeSubtitleEnabled = true
-            activeSubtitleCues = emptyList()
-            subtitleCueCursor = 0
-            lastSubtitlePositionMs = 0L
-            lastRenderedSubtitleText = null
-            subtitleRenderHandler.removeCallbacks(subtitleRenderRunnable)
-            nativePlayerView?.subtitleView?.let { applySubtitleStyleToView(it) }
-
-            subtitleActivationTimeout?.let(subtitleActivationHandler::removeCallbacks)
-            val activationTimeout = Runnable {
-                if (pendingSubtitleLabel == label && pendingSubtitleRequestId != null) {
-                    android.util.Log.i("SONIXSubtitle", "Activation fallback completed for label='$label'")
-                    notifySubtitleStateChanged(true, activeSubtitleLabel, true)
-                    finishSubtitleActivation(true, "")
-                }
-            }
-            subtitleActivationTimeout = activationTimeout
-            subtitleActivationHandler.postDelayed(activationTimeout, 6000L)
-
-            completeSubtitleActivationIfTrackAvailable(player, player.currentTracks)
-        } catch (error: Exception) {
-            android.util.Log.e("SONIXSubtitle", "attachSubtitleFile failed", error)
-            finishSubtitleActivation(false, error.message ?: "تعذر تفعيل الترجمة")
-        }
-    }
-
-    private fun completeSubtitleActivationIfTrackAvailable(player: ExoPlayer, tracks: Tracks) {
-        if (player !== nativePlayer || activeSubtitleFile == null) return
-        val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+        val requestGeneration = subtitleGeneration.get()
+        val positionBefore = player.currentPosition.coerceAtLeast(0L)
+        val playWhenReadyBefore = player.playWhenReady
+        val isPlayingBefore = player.isPlaying
         android.util.Log.i(
             "SONIXSubtitle",
-            "completeSubtitleActivationIfTrackAvailable: textGroups=${textGroups.size} pendingLabel='$pendingSubtitleLabel' activeLabel='$activeSubtitleLabel'"
+            "ATTACH_REQUEST label='$label' path=${sourceFile.name} positionBefore=${positionBefore}ms " +
+                "playWhenReadyBefore=$playWhenReadyBefore isPlayingBefore=$isPlayingBefore reload=false reason=SubtitleView+SubtitlePipeline"
         )
 
-        var chosenGroup: Tracks.Group? = null
-        var chosenIndex = -1
-
-        for (group in textGroups) {
-            for (i in 0 until group.length) {
-                val format = group.getTrackFormat(i)
-                val matchesLabel = pendingSubtitleLabel.isNotBlank() && (
-                    format.label?.equals(pendingSubtitleLabel, ignoreCase = true) == true ||
-                    format.label?.contains(pendingSubtitleLabel, ignoreCase = true) == true ||
-                    pendingSubtitleLabel.contains(format.label.orEmpty(), ignoreCase = true)
-                )
-                val isDefault = (format.selectionFlags and C.SELECTION_FLAG_DEFAULT) != 0
-                if (matchesLabel || isDefault || textGroups.size == 1) {
-                    chosenGroup = group
-                    chosenIndex = i
-                    break
-                }
+        subtitleIoExecutor.execute {
+            val parseResult = try {
+                Result.success(parseSubtitleFile(sourceFile).also {
+                    require(it.isNotEmpty()) { "لم يتم العثور على مقاطع ترجمة صالحة في الملف" }
+                })
+            } catch (error: Exception) {
+                Result.failure<List<TimedSubtitleCue>>(error)
             }
-            if (chosenGroup != null) break
-        }
 
-        if (chosenGroup != null && chosenIndex >= 0) {
-            val format = chosenGroup.getTrackFormat(chosenIndex)
-            android.util.Log.i(
-                "SONIXSubtitle",
-                "Selected text track: index=$chosenIndex format=$format isSupported=${chosenGroup.isTrackSupported(chosenIndex)} isSelected=${chosenGroup.isTrackSelected(chosenIndex)}"
-            )
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                .addOverride(TrackSelectionOverride(chosenGroup.mediaTrackGroup, chosenIndex))
-                .build()
-            activeSubtitleEnabled = true
-            notifySubtitleStateChanged(true, activeSubtitleLabel, true)
-            finishSubtitleActivation(true, "")
-        } else if (textGroups.isNotEmpty()) {
-            val first = textGroups.first()
-            android.util.Log.i("SONIXSubtitle", "Fallback selecting first text track: format=${first.getTrackFormat(0)}")
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                .addOverride(TrackSelectionOverride(first.mediaTrackGroup, 0))
-                .build()
-            activeSubtitleEnabled = true
-            notifySubtitleStateChanged(true, activeSubtitleLabel, true)
-            finishSubtitleActivation(true, "")
+            runOnUiThread {
+                if (requestGeneration != subtitleGeneration.get() || player !== nativePlayer || activeMediaUri != mediaUri) {
+                    if (requestId != null) {
+                        deliverSubtitleResponse(
+                            requestId,
+                            JSONObject().put("success", false)
+                                .put("error", "تغير المحتوى قبل اكتمال تحليل الترجمة").toString()
+                        )
+                    }
+                    return@runOnUiThread
+                }
+
+                if (parseResult.isFailure) {
+                    val error = parseResult.exceptionOrNull()
+                    android.util.Log.e(
+                        "SONIXSubtitle",
+                        "ATTACH_FAILED label='$label' reload=false videoContinues=true",
+                        error
+                    )
+                    finishSubtitleActivation(false, error?.message ?: "تعذر تحليل ملف الترجمة")
+                    return@runOnUiThread
+                }
+
+                val parsedCues = parseResult.getOrThrow()
+                activeSubtitleFile = sourceFile
+                activeSubtitleSourceFile = sourceFile
+                activeSubtitleLabel = label
+                activeSubtitleBaseCues = parsedCues
+                activeSubtitleCues = applySubtitleDelayToCues(parsedCues, subtitleDelayMs)
+                activeSubtitleEnabled = true
+                subtitleCueCursor = 0
+                lastSubtitlePositionMs = 0L
+                lastRenderedSubtitleText = null
+                subtitleRenderHandler.removeCallbacks(subtitleRenderRunnable)
+                nativePlayerView?.subtitleView?.let { applySubtitleStyleToView(it) }
+                subtitleRenderHandler.post(subtitleRenderRunnable)
+
+                notifySubtitleStateChanged(true, activeSubtitleLabel, true)
+                finishSubtitleActivation(true, "")
+                android.util.Log.i(
+                    "SONIXSubtitle",
+                    "ATTACH_COMPLETE label='$label' cueCount=${activeSubtitleCues.size} " +
+                        "positionBefore=${positionBefore}ms positionAfter=${player.currentPosition}ms " +
+                        "playWhenReadyBefore=$playWhenReadyBefore playWhenReadyAfter=${player.playWhenReady} " +
+                        "isPlayingBefore=$isPlayingBefore isPlayingAfter=${player.isPlaying} reload=false"
+                )
+            }
         }
     }
 
@@ -1540,6 +1544,7 @@ class MainActivity : ComponentActivity() {
         activeSubtitleSourceFile = null
         activeSubtitleLabel = ""
         activeSubtitleEnabled = false
+        activeSubtitleBaseCues = emptyList()
         activeSubtitleCues = emptyList()
         subtitleCueCursor = 0
         lastSubtitlePositionMs = 0L
@@ -1645,6 +1650,9 @@ class MainActivity : ComponentActivity() {
         liveRecoveryRunnable?.let(playbackRecoveryHandler::removeCallbacks)
         liveRecoveryRunnable = null
         bufferingStartedAtMs = 0L
+        bufferingUiRunnable?.let(playbackRecoveryHandler::removeCallbacks)
+        bufferingUiRunnable = null
+        bufferingUiShown = false
         hasPlaybackReachedReady = false
         liveRecoveryAttempts = 0
         subtitleGeneration.incrementAndGet()
@@ -1681,8 +1689,6 @@ class MainActivity : ComponentActivity() {
     private fun scheduleLiveRecovery(player: ExoPlayer, reason: String) {
         if (player !== nativePlayer || !nativePlayerActive || nativeVideoStreamType != "live") return
         if (liveRecoveryRunnable != null) return
-        webView?.evaluateJavascript(
-            "window.onNativePlaybackBuffering && window.onNativePlaybackBuffering('جارٍ إعادة الاتصال بالقناة...')", null)
         if (liveRecoveryAttempts >= 3) {
             val message = "تعذر استعادة القناة بعد 3 محاولات. " + reason
             android.util.Log.e("SONIXPlayback", message)
@@ -1706,10 +1712,14 @@ class MainActivity : ComponentActivity() {
             try {
                 val shouldResume = player.playWhenReady
                 bufferingStartedAtMs = SystemClock.elapsedRealtime()
-                player.stop()
-                player.setMediaItem(currentItem, true)
+                player.seekToDefaultPosition()
                 player.prepare()
                 player.playWhenReady = shouldResume
+                android.util.Log.i(
+                    "SONIXPlayback",
+                    "Live recovery prepared at live edge attempt=$attempt/3 playWhenReady=$shouldResume"
+                )
+                startPlaybackWatchdog(player)
             } catch (error: Exception) {
                 scheduleLiveRecovery(player, error.message ?: "فشلت إعادة الاتصال")
             }
@@ -1728,6 +1738,9 @@ class MainActivity : ComponentActivity() {
         playbackProgressHandler.removeCallbacks(playbackProgressRunnable)
         playbackWatchdogRunnable?.let(playbackRecoveryHandler::removeCallbacks)
         playbackWatchdogRunnable = null
+        bufferingUiRunnable?.let(playbackRecoveryHandler::removeCallbacks)
+        bufferingUiRunnable = null
+        bufferingUiShown = false
         liveRecoveryRunnable?.let(playbackRecoveryHandler::removeCallbacks)
         liveRecoveryRunnable = null
         bufferingStartedAtMs = 0L
