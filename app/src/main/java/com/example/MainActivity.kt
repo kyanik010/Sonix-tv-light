@@ -97,7 +97,6 @@ class MainActivity : ComponentActivity() {
     @Volatile private var immersiveVideoFullscreen = false
     private var activeMediaUri: Uri? = null
     private var activeSubtitleFile: File? = null
-    private var activeSubtitleSourceFile: File? = null
     private var activeSubtitleLabel: String = ""
     @Volatile private var activeSubtitleEnabled: Boolean = true
     private var subtitleDelayMs = 0L
@@ -1464,8 +1463,7 @@ class MainActivity : ComponentActivity() {
 
                 val parsedCues = parseResult.getOrThrow()
                 activeSubtitleFile = sourceFile
-                activeSubtitleSourceFile = sourceFile
-                activeSubtitleLabel = label
+                        activeSubtitleLabel = label
                 activeSubtitleBaseCues = parsedCues
                 activeSubtitleCues = applySubtitleDelayToCues(parsedCues, subtitleDelayMs)
                 activeSubtitleEnabled = true
@@ -1508,7 +1506,6 @@ class MainActivity : ComponentActivity() {
     private fun clearActiveSubtitleOverlay() {
         subtitleRenderHandler.removeCallbacks(subtitleRenderRunnable)
         activeSubtitleFile = null
-        activeSubtitleSourceFile = null
         activeSubtitleLabel = ""
         activeSubtitleEnabled = false
         activeSubtitleBaseCues = emptyList()
