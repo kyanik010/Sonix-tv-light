@@ -1712,6 +1712,10 @@ class MainActivity : ComponentActivity() {
             try {
                 val shouldResume = player.playWhenReady
                 bufferingStartedAtMs = SystemClock.elapsedRealtime()
+                android.util.Log.i(
+                    "SONIXPlayback",
+                    "BUFFERING_START recoveryAttempt=$attempt/3 streamId=$nativeVideoStreamId"
+                )
                 player.seekToDefaultPosition()
                 player.prepare()
                 player.playWhenReady = shouldResume
