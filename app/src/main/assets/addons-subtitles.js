@@ -488,9 +488,6 @@
     try {
       window.NativePlayback.setSubtitleStyle(subtitleStyle.font,String(subtitleStyle.size),color,
         subtitleStyle.background,subtitleStyle.outline,subtitleStyle.position);
-      if (typeof window.NativePlayback.setSubtitleDelay === 'function') {
-        window.NativePlayback.setSubtitleDelay(Number(subtitleStyle.delay) || 0);
-      }
     } catch (error) { console.warn('Unable to apply subtitle style',error); }
   }
 
