@@ -66,7 +66,7 @@
 
     const SONIX_SETTINGS_KEY = 'sonix_user_settings_v1';
     const SONIX_DEFAULT_SETTINGS = {
-      quality: 720,
+      quality: 1080,
       subtitles: true,
       favoritesFirst: false,
       rememberSection: true,
@@ -77,7 +77,13 @@
       try {
         const saved = JSON.parse(localStorage.getItem(SONIX_SETTINGS_KEY) || '{}');
         const value = {...SONIX_DEFAULT_SETTINGS, ...(saved && typeof saved === 'object' ? saved : {})};
-        value.quality = [480,720,1080].includes(Number(value.quality)) ? Number(value.quality) : 720;
+        value.quality = [480,720,1080].includes(Number(value.quality)) ? Number(value.quality) : 1080;
+        value.qualityUserSelected = saved.qualityUserSelected === true;
+        if (localStorage.getItem('sonix_quality_migrated_v2') !== '1') {
+          if (Number(saved.quality) === 720 && !value.qualityUserSelected) value.quality = 1080;
+          localStorage.setItem('sonix_quality_migrated_v2', '1');
+          localStorage.setItem(SONIX_SETTINGS_KEY, JSON.stringify(value));
+        }
         value.textScale = [90,100,110,120].includes(Number(value.textScale)) ? Number(value.textScale) : 100;
         ['subtitles','favoritesFirst','rememberSection','rememberItem'].forEach(key => value[key] = value[key] !== false);
         return value;
@@ -109,6 +115,7 @@
     }
     function updateSonixSetting(key, value) {
       sonixSettings[key] = value;
+      if (key === 'quality') sonixSettings.qualityUserSelected = true;
       saveSonixSettings();
       if (key === 'textScale') applySonixAppearance();
       if (key === 'favoritesFirst' && currentActiveCategory === 'all') renderItems();
