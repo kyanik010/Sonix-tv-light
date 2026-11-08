@@ -2960,9 +2960,9 @@
       if (videoPlaybackController) {
         videoPlaybackController.hideLoader();
         if (window.SonixSubtitles && window.SonixSubtitles.applyStyle) window.SonixSubtitles.applyStyle();
-        if (window.SonixSubtitles && window.SonixSubtitles.applyDelay) window.SonixSubtitles.applyDelay();
         const panel=document.querySelector('.live-player-col'); if(panel) panel.classList.add('has-active-playback');
       }
+      if (window.SonixSubtitles && window.SonixSubtitles.applyDelay) window.SonixSubtitles.applyDelay();
     };
     window.onNativePlaybackStateChanged = function(isPlaying) { if (videoPlaybackController) videoPlaybackController.updatePlaybackState(!!isPlaying); };
     window.onNativePlaybackProgress = function(positionMs, durationMs, seekable) {
