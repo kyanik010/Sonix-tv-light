@@ -156,7 +156,6 @@ class MainActivity : ComponentActivity() {
     private val codecDiagnosticsExecutor = Executors.newSingleThreadExecutor()
     private var lastUhdCodecDiagnosticKey: String? = null
     private val subtitleGeneration = AtomicLong(0)
-    private val subtitleActivationHandler = Handler(Looper.getMainLooper())
     private val playbackProgressHandler = Handler(Looper.getMainLooper())
     private val playbackProgressRunnable = object : Runnable {
         override fun run() {
@@ -174,7 +173,6 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-    private var subtitleActivationTimeout: Runnable? = null
     private var pendingSubtitleRequestId: String? = null
     private var pendingSubtitleLabel = ""
     private var pendingSubtitleNotifyLocal = false
@@ -1322,18 +1320,6 @@ class MainActivity : ComponentActivity() {
         })
     }
 
-    private fun prepareExternalSubtitleWithSync(sourceFile: File, offsetMs: Long): File {
-        if (offsetMs == 0L) return sourceFile
-        val extension = sourceFile.extension.lowercase(Locale.ROOT)
-        if (extension != "srt" && extension != "vtt") return sourceFile
-        val folder = File(cacheDir, "subtitles").apply { mkdirs() }
-        val target = File(folder, "synced_${System.currentTimeMillis()}.$extension")
-        val sourceText = sourceFile.readText(Charsets.UTF_8)
-        val shifted = SubtitlePipeline.applyDelay(sourceText, extension, offsetMs)
-        target.writeText(shifted, Charsets.UTF_8)
-        return target
-    }
-
     private fun applySubtitleDelayToCues(
         cues: List<TimedSubtitleCue>,
         offsetMs: Long
@@ -1375,23 +1361,6 @@ class MainActivity : ComponentActivity() {
             "SONIXSubtitle",
             "Subtitle delay changed old=$previousOffsetMs new=$newOffsetMs reload=false reason=in-memory-cue-shift"
         )
-    }
-
-    private fun detectLanguageFromLabelOrName(label: String, fileName: String): String {
-        val text = "$label $fileName".lowercase(Locale.ROOT)
-        return when {
-            text.contains("ara") || text.contains("عرب") -> "ar"
-            text.contains("eng") || text.contains("انجليز") -> "en"
-            text.contains("hin") || text.contains("هند") -> "hi"
-            text.contains("urd") || text.contains("اردو") -> "ur"
-            text.contains("fre") || text.contains("fra") || text.contains("فرنس") -> "fr"
-            text.contains("spa") || text.contains("اسبان") -> "es"
-            text.contains("ger") || text.contains("deu") || text.contains("المان") -> "de"
-            text.contains("ita") || text.contains("ايطال") -> "it"
-            text.contains("tur") || text.contains("ترك") -> "tr"
-            text.contains("per") || text.contains("fas") || text.contains("فارس") -> "fa"
-            else -> "und"
-        }
     }
 
     private fun setSubtitlesEnabledInternal(enabled: Boolean) {
@@ -1457,7 +1426,7 @@ class MainActivity : ComponentActivity() {
         val isPlayingBefore = player.isPlaying
         android.util.Log.i(
             "SONIXSubtitle",
-            "ATTACH_REQUEST label='$label' path=${sourceFile.name} positionBefore=${positionBefore}ms " +
+            "ATTACH_REQUEST label='$label' path=${sourceFile.absolutePath} positionBefore=${positionBefore}ms " +
                 "playWhenReadyBefore=$playWhenReadyBefore isPlayingBefore=$isPlayingBefore reload=false reason=SubtitleView+SubtitlePipeline"
         )
 
@@ -1521,8 +1490,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun finishSubtitleActivation(success: Boolean, message: String) {
-        subtitleActivationTimeout?.let(subtitleActivationHandler::removeCallbacks)
-        subtitleActivationTimeout = null
         val requestId = pendingSubtitleRequestId
         val label = pendingSubtitleLabel
         val notifyLocal = pendingSubtitleNotifyLocal
