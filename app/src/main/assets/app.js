@@ -76,11 +76,12 @@
     function readSonixSettings() {
       try {
         const saved = JSON.parse(localStorage.getItem(SONIX_SETTINGS_KEY) || '{}');
-        const value = {...SONIX_DEFAULT_SETTINGS, ...(saved && typeof saved === 'object' ? saved : {})};
+        const savedSettings = saved && typeof saved === 'object' ? saved : {};
+        const value = {...SONIX_DEFAULT_SETTINGS, ...savedSettings};
         value.quality = [480,720,1080].includes(Number(value.quality)) ? Number(value.quality) : 1080;
-        value.qualityUserSelected = saved.qualityUserSelected === true;
+        value.qualityUserSelected = savedSettings.qualityUserSelected === true;
         if (localStorage.getItem('sonix_quality_migrated_v2') !== '1') {
-          if (Number(saved.quality) === 720 && !value.qualityUserSelected) value.quality = 1080;
+          if (Number(savedSettings.quality) === 720 && !value.qualityUserSelected) value.quality = 1080;
           localStorage.setItem('sonix_quality_migrated_v2', '1');
           localStorage.setItem(SONIX_SETTINGS_KEY, JSON.stringify(value));
         }
@@ -2959,6 +2960,7 @@
       if (videoPlaybackController) {
         videoPlaybackController.hideLoader();
         if (window.SonixSubtitles && window.SonixSubtitles.applyStyle) window.SonixSubtitles.applyStyle();
+        if (window.SonixSubtitles && window.SonixSubtitles.applyDelay) window.SonixSubtitles.applyDelay();
         const panel=document.querySelector('.live-player-col'); if(panel) panel.classList.add('has-active-playback');
       }
     };
