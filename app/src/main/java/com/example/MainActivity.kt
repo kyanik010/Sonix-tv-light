@@ -1463,7 +1463,7 @@ class MainActivity : ComponentActivity() {
 
                 val parsedCues = parseResult.getOrThrow()
                 activeSubtitleFile = sourceFile
-                        activeSubtitleLabel = label
+                activeSubtitleLabel = label
                 activeSubtitleBaseCues = parsedCues
                 activeSubtitleCues = applySubtitleDelayToCues(parsedCues, subtitleDelayMs)
                 activeSubtitleEnabled = true
