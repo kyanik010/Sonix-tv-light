@@ -117,6 +117,10 @@
         if (control.type === 'checkbox') control.checked = Boolean(value);
         else control.value = String(value);
       });
+      const qualityLabel = document.getElementById('quality-label');
+      if (qualityLabel) qualityLabel.textContent = Number(sonixSettings.quality) === 0 ? 'تلقائي' : Number(sonixSettings.quality) + 'p';
+      document.querySelectorAll('.player-quality-option').forEach(option =>
+        option.setAttribute('aria-pressed', String(Number(option.dataset.quality) === Number(sonixSettings.quality))));
     }
     function updateSonixSetting(key, value) {
       sonixSettings[key] = value;
