@@ -178,4 +178,4 @@ class SubtitlePipelineTest {
         assertEquals(1, cues.size)
         assertEquals("Hello", cues[0].text)
     }
-}\n
+}
