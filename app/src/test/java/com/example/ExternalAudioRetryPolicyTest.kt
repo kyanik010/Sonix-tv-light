@@ -18,4 +18,23 @@ class ExternalAudioRetryPolicyTest {
         assertEquals(1000L, externalAudioRetryDelayMs(0))
         assertEquals(1000L, externalAudioRetryDelayMs(-3))
     }
+
+    @Test fun positiveOffsetDelaysAudioFromVideoReferenceWithoutAccumulation() {
+        assertEquals(9500L, ExternalAudioSyncPolicy.targetPositionMs(10000L, 500L, 30000L))
+        assertEquals(8000L, ExternalAudioSyncPolicy.targetPositionMs(10000L, 2000L, 30000L))
+        assertEquals(9500L, ExternalAudioSyncPolicy.targetPositionMs(10000L, 500L, 30000L))
+    }
+
+    @Test fun negativeOffsetAdvancesAudioAndBoundsTarget() {
+        assertEquals(10500L, ExternalAudioSyncPolicy.targetPositionMs(10000L, -500L, 30000L))
+        assertEquals(0L, ExternalAudioSyncPolicy.targetPositionMs(100L, 500L, 30000L))
+        assertEquals(12000L, ExternalAudioSyncPolicy.targetPositionMs(20000L, -500L, 12000L))
+    }
+
+    @Test fun liveDriftCorrectionUsesToleranceAndDirection() {
+        assertEquals(1.02f, ExternalAudioSyncPolicy.livePlaybackSpeed(1000L, 1400L, 0L), 0.001f)
+        assertEquals(0.98f, ExternalAudioSyncPolicy.livePlaybackSpeed(1000L, 500L, 0L), 0.001f)
+        assertEquals(1.0f, ExternalAudioSyncPolicy.livePlaybackSpeed(1000L, 1100L, 0L), 0.001f)
+        assertEquals(1.02f, ExternalAudioSyncPolicy.livePlaybackSpeed(1000L, 1800L, 500L), 0.001f)
+    }
 }

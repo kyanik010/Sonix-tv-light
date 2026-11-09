@@ -391,9 +391,9 @@
 
       loadItem(item) {
         if (!item) return;
-        if (dualAudioEngine && dualAudioEngine.isActive &&
-            dualAudioEngine.selectedSourceChannel &&
-            String(dualAudioEngine.selectedSourceChannel.id) === String(item.id)) {
+        // External audio belongs to the previously playing video item. Always
+        // detach it before switching/retrying content, regardless of channel IDs.
+        if (dualAudioEngine && dualAudioEngine.isActive) {
           dualAudioEngine.stopExternalAudio(false);
         }
         this.currentItem = item;
@@ -817,6 +817,9 @@
     window.onExternalAudioPlaying = function() { if (dualAudioEngine) dualAudioEngine.onPlaying(); };
     window.onExternalAudioError = function(message) { if (dualAudioEngine) dualAudioEngine.onFailure(message); };
     window.onExternalAudioStopped = function() { if (dualAudioEngine && dualAudioEngine.isActive) dualAudioEngine.stopExternalAudio(false, false); };
+    window.onExternalAudioDetached = function() {
+      if (dualAudioEngine && dualAudioEngine.isActive) dualAudioEngine.stopExternalAudio(false, false);
+    };
 
     /**
      * =========================================================================
