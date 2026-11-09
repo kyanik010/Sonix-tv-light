@@ -12,6 +12,7 @@ on:
       - fix/android-subtitle-regex
       - sonix-tv-vip
       - sonix-control-integration
+      - fix/android-subtitle-regex
       # Keep the SONIX TV VIP branch covered by the Android build and test workflow.
   workflow_dispatch:
 
