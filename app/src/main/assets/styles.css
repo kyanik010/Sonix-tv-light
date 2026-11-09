@@ -372,9 +372,9 @@
       width: 100%;
       box-sizing: border-box;
       padding: clamp(6px, 0.9vh, 9px) clamp(16px, 2.2vw, 28px);
-      border: 1px solid rgba(37, 211, 102, 0.35);
+      border: 1px solid var(--card-border);
       border-radius: 9999px;
-      background: rgba(17, 24, 32, 0.88);
+      background: var(--card-glass);
       backdrop-filter: blur(14px);
       box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06);
       white-space: nowrap;
@@ -401,9 +401,9 @@
       align-items: center;
       justify-content: center;
       gap: clamp(10px, 1.6vw, 22px);
-      background: rgba(17, 24, 32, 0.88);
+      background: var(--card-glass);
       backdrop-filter: blur(14px);
-      border: 1px solid rgba(143, 184, 232, 0.22);
+      border: 1px solid var(--card-border);
       border-radius: 9999px;
       padding: clamp(6px, 1vh, 9px) clamp(16px, 2.2vw, 28px);
       box-shadow: 0 4px 18px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.08);
@@ -419,7 +419,7 @@
     .user-card-divider {
       width: 1px;
       height: 14px;
-      background: rgba(143, 184, 232, 0.25);
+      background: var(--card-border);
       flex-shrink: 0;
     }
     .user-card-label {
