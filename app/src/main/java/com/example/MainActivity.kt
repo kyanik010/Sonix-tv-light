@@ -626,7 +626,7 @@ class MainActivity : ComponentActivity() {
                 ).also { nativePlayerView = it }
             playerView.apply {
                 setUseController(false)
-                setResizeMode(if (immersiveVideoFullscreen) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT)
+                setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT)
                 setKeepContentOnPlayerReset(true)
                 setShutterBackgroundColor(Color.TRANSPARENT)
                 setBackgroundColor(Color.TRANSPARENT)
@@ -658,7 +658,7 @@ class MainActivity : ComponentActivity() {
                 .clearOverridesOfType(C.TRACK_TYPE_TEXT)
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                 .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
-                .setForceHighestSupportedBitrate(true)
+                .setForceHighestSupportedBitrate(false)
                 .build()
 
             val isLive = streamType == "live"
@@ -849,12 +849,8 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 immersiveVideoFullscreen = enabled
                 applyVideoFullscreenSystemUi()
-                nativePlayerView?.resizeMode = if (enabled) {
-                    // Fill ultrawide phone displays in fullscreen; restore the full frame in preview.
-                    AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                } else {
-                    AspectRatioFrameLayout.RESIZE_MODE_FIT
-                }
+                // Preserve the complete video frame in both preview and fullscreen.
+                nativePlayerView?.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 // System-bar visibility changes resize the WebView asynchronously. Re-read
                 // its final viewport after the inset/layout pass and realign the native surface.
                 webView?.postDelayed({
@@ -946,14 +942,24 @@ class MainActivity : ComponentActivity() {
         fun setVideoQuality(maxHeight: Int) {
             runOnUiThread {
                 val player = nativePlayer ?: return@runOnUiThread
-                val height = maxHeight.coerceIn(360, 2160)
-                val width = (height * 16f / 9f).roundToInt()
-                player.trackSelectionParameters = player.trackSelectionParameters
-                    .buildUpon()
-                    .setMaxVideoSize(width, height)
-                    .setForceHighestSupportedBitrate(height >= 1080)
-                    .build()
-                android.util.Log.i("SONIXPlayback", "setVideoQuality: maxHeight=$height (maxVideoSize=${width}x$height, forceHighestBitrate=${height >= 1080})")
+                if (maxHeight <= 0) {
+                    // Auto: remove the manual resolution cap and let Media3 adapt to bandwidth.
+                    player.trackSelectionParameters = player.trackSelectionParameters
+                        .buildUpon()
+                        .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
+                        .setForceHighestSupportedBitrate(false)
+                        .build()
+                    android.util.Log.i("SONIXPlayback", "setVideoQuality: Auto (adaptive resolution)")
+                } else {
+                    val height = maxHeight.coerceIn(360, 2160)
+                    val width = (height * 16f / 9f).roundToInt()
+                    player.trackSelectionParameters = player.trackSelectionParameters
+                        .buildUpon()
+                        .setMaxVideoSize(width, height)
+                        .setForceHighestSupportedBitrate(false)
+                        .build()
+                    android.util.Log.i("SONIXPlayback", "setVideoQuality: maxHeight=$height (maxVideoSize=${width}x$height)")
+                }
             }
         }
 
