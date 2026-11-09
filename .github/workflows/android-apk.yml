@@ -9,6 +9,7 @@ on:
       - feature/sonix-external-audio-complete
       - sonix-tv-only
       - feature/stremio-addons-subtitle-system
+      - fix/android-subtitle-regex
       - sonix-tv-vip
       - sonix-control-integration
       # Keep the SONIX TV VIP branch covered by the Android build and test workflow.

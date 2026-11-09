@@ -170,4 +170,12 @@ class SubtitlePipelineTest {
         assertEquals("fa", SubtitlePipeline.detectLanguage("Persian (فارسی)"))
         assertEquals("und", SubtitlePipeline.detectLanguage("Unknown Label"))
     }
-}
+
+    @Test
+    fun removesAssOverrideTagsWithoutBreakingSrtParsing() {
+        val srt = "1\n00:00:01,000 --> 00:00:02,000\n{\\an8}Hello"
+        val cues = SubtitlePipeline.parse(srt, "srt")
+        assertEquals(1, cues.size)
+        assertEquals("Hello", cues[0].text)
+    }
+}\n

@@ -179,7 +179,7 @@ internal object SubtitlePipeline {
             .replace("&lt;", "<").replace("&gt;", ">")
             .replace("&quot;", "\"").replace("&#39;", "'")
             .replace("\\N", "\n")
-            .replace(Regex("\\{[^}]*}"), "")
+            .replace(Regex("\\{[^}]*\\}"), "")
             .trim()
 
     private fun decodeText(bytes: ByteArray): String {
