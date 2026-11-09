@@ -403,7 +403,8 @@
                 <span id="quality-label">جودة</span>
               </button>
               <div class="player-quality-menu" id="player-quality-menu">
-                <button class="player-quality-option focusable" data-quality="1080" aria-pressed="true">1080p</button>
+                <button class="player-quality-option focusable" data-quality="0" aria-pressed="true">تلقائي</button>
+                <button class="player-quality-option focusable" data-quality="1080" aria-pressed="false">1080p</button>
                 <button class="player-quality-option focusable" data-quality="720" aria-pressed="false">720p</button>
                 <button class="player-quality-option focusable" data-quality="480" aria-pressed="false">480p</button>
               </div>
@@ -629,6 +630,7 @@
             <label class="settings-row" for="settings-quality">
               <span><strong>جودة الفيديو الافتراضية</strong><small>تُطبق عند بدء تشغيل المحتوى</small></span>
               <select id="settings-quality" class="settings-select focusable">
+                <option value="0">تلقائي</option>
                 <option value="1080">1080p</option>
                 <option value="720">720p</option>
                 <option value="480">480p</option>
