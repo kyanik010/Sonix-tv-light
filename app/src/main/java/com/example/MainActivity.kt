@@ -765,6 +765,8 @@ class MainActivity : ComponentActivity() {
                                 "window.onNativePlaybackReady && window.onNativePlaybackReady()", null)
                         }
                         Player.STATE_ENDED -> {
+                            // Do not let a separate live audio source outlive an ended VOD item.
+                            detachExternalAudioInternal(true)
                             bufferingMessageRunnable?.let(bufferingMessageHandler::removeCallbacks)
                             bufferingMessageRunnable = null
                             playbackWatchdogRunnable?.let(playbackRecoveryHandler::removeCallbacks)
